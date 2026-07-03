@@ -28,10 +28,29 @@ In-transit assembly rule (Mod 2):
   immediately in case the new product's materials are already loaded.
 
 Two-phase navigation rule:
-  Every station approach is split into two legs:
+  Every station approach is split into two legs, always via _approach(id):
     1. navigate_subgoal(id)  — fast cruise; arm may ASSEMBLE during this leg.
        At sub_goal: wait_for_intransit_assembly() blocks until arm is idle.
     2. navigate_goal(id)     — precision parking; arm must be idle.
+  Never call navigate_subgoal()/navigate_goal() directly — always go
+  through _approach() so this rule can't be silently skipped at a new
+  call site.
+
+Deferred recycle rule (lifecycle produce-then-recycle):
+  A recycle order whose product_id has no matching stock on the customer
+  counter at plan time can't be disassembled up front — the robot must
+  assemble and deliver it first. Plan.deferred_recycle_ids lists those
+  product_ids; _run_deferred_recycle_phase() reclaims them from the customer
+  counter and disassembles them after every delivery is otherwise complete.
+
+Fail-loud / self-recovery rule:
+  Every navigate/arm/wb call the Executor makes is checked against its
+  return value; a failure raises ExecutionFailure instead of silently
+  continuing with a plan that no longer matches physical reality. run()
+  catches any such failure, makes one best-effort attempt to return the AMR
+  to its home station anyway (so a mid-mission fault never strands it in
+  the arena), and then re-raises so the caller sees a clear error instead of
+  a silently-incomplete or hung run.
 
 If the last material for a cargo product is picked at the final storage
 station, delivery still starts immediately: the AMR drives toward the customer
@@ -61,6 +80,11 @@ class Plan:
     material_home_station: Dict[int, int] = field(default_factory=dict)
     product_weights: Dict[int, float] = field(default_factory=dict)
     storage_ledger_seed: Dict[int, Dict[int, int]] = field(default_factory=dict)
+    # Product ids that are both produced and recycled this run, with no
+    # matching stock on the customer counter at plan time. These must be
+    # assembled, delivered, then picked back up for disassembly — handled by
+    # Executor._run_deferred_recycle_phase() after normal delivery.
+    deferred_recycle_ids: List[int] = field(default_factory=list)
 
 
 class ExecutionFailure(RuntimeError):
@@ -103,6 +127,25 @@ class Executor:
     def run(self) -> None:
         self._log("Executor started")
 
+        try:
+            self._run_mission()
+        except Exception as e:
+            self._log(
+                f"! Execution failed mid-plan ({e!r}) — attempting best-effort "
+                "return to home so the AMR isn't stranded"
+            )
+            try:
+                self._return_to_home()
+            except Exception as home_err:
+                self._log(f"! Best-effort return-to-home also failed: {home_err!r}")
+            raise
+
+        # Return to home station (0 for A-side, 14 for B-side)
+        self._return_to_home()
+
+        self._log("Executor finished")
+
+    def _run_mission(self) -> None:
         # Phase 1: recycle pickups (customer counter → workbench → disassembly)
         self._run_recycle_phase()
 
@@ -143,15 +186,15 @@ class Executor:
         self._collect_ready_workbench_products(block=True)
         self._deliver_until_idle()
 
+        # Lifecycle produce-then-recycle products: reclaim from the customer
+        # counter now that they've been delivered, disassemble, and return
+        # the materials to storage.
+        self._run_deferred_recycle_phase()
+
         # After the products are delivered, collect any recycle outputs that
         # were pure surplus and return them to their material station.
         self._collect_ready_recycle_outputs(block=True)
         self._return_surplus_materials()
-
-        # Return to home station (0 for A-side, 14 for B-side)
-        self._return_to_home()
-
-        self._log("Executor finished")
 
     # ------------------------------------------------------------------
     # Phase 1 — Recycle pickup
@@ -186,19 +229,15 @@ class Executor:
             pid = entry['recycle_product_id']
 
             self._log(f"  → navigate to customer station {station_id}")
-            self._node.navigate_subgoal(station_id)
-            self._wait_for_intransit_assembly()
-            self._node.navigate_goal(station_id)
-            if not self._node.arm_pick_product(station_id=station_id, product_id=pid):
-                raise ExecutionFailure(
-                    f"Failed to pick recycle product {pid} from customer {station_id}"
-                )
-            self._node.call_post_process()
+            self._approach(station_id)
+            self._require(
+                self._node.arm_pick_product(station_id=station_id, product_id=pid),
+                f"arm_pick_product(station={station_id}, product={pid})",
+            )
+            self._soft(self._node.call_post_process(), "call_post_process (customer)")
 
             self._log(f"  → navigate to workbench {workbench_id} for RECYCLE")
-            self._node.navigate_subgoal(workbench_id)
-            self._wait_for_intransit_assembly()
-            self._node.navigate_goal(workbench_id)
+            self._approach(workbench_id)
 
             # Clear out the previous product's disassembled materials first so
             # the workbench shelf is free before we place the next product on it.
@@ -209,13 +248,12 @@ class Executor:
                 pending_wb_handle = None
                 pending_wb_pid = None
 
-            if not self._node.arm_unload_product_to_workbench(
-                product_id=pid,
-                station_id=workbench_id,
-            ):
-                raise ExecutionFailure(
-                    f"Failed to unload recycle product {pid} to workbench {workbench_id}"
-                )
+            self._require(
+                self._node.arm_unload_product_to_workbench(
+                    product_id=pid, station_id=workbench_id,
+                ),
+                f"arm_unload_product_to_workbench(product={pid}, station={workbench_id})",
+            )
             pending_wb_handle = self._node.wb_task_async('RECYCLE', pid)
             pending_wb_pid = pid
 
@@ -235,10 +273,10 @@ class Executor:
                 )
                 pending_wb_handle = None
                 pending_wb_pid = None
-                self._node.call_post_process()
+                self._soft(self._node.call_post_process(), "call_post_process (wb wait-here)")
                 self._start_ready_intransit_assembly()
             else:
-                self._node.call_post_process()
+                self._soft(self._node.call_post_process(), "call_post_process (workbench)")
                 self._start_ready_intransit_assembly()
                 if is_last:
                     self._log(
@@ -264,22 +302,22 @@ class Executor:
                     workbench_id, "drop recycled overflow materials"
                 )
                 dropped = self._node.cargo_materials_snapshot()
-                if not self._node.arm_unload_all_materials():
-                    raise ExecutionFailure(
-                        "Failed to unload recycled overflow materials at workbench"
-                    )
+                self._require(
+                    self._node.arm_unload_all_materials(),
+                    "arm_unload_all_materials (recycle overflow)",
+                )
                 for _, mat_id in dropped:
                     self._ledger.add(workbench_id, mat_id)
                 self._log_ledger('recycle-overflow-drop')
                 self._start_ready_workbench_production()
-                self._node.call_post_process()
+                self._soft(self._node.call_post_process(), "call_post_process (overflow)")
 
         # Collect whatever disassembly is still pending after the last pickup.
         if pending_wb_handle is not None:
             self._collect_recycled_materials(
                 pending_wb_handle, pending_wb_pid, workbench_id
             )
-            self._node.call_post_process()
+            self._soft(self._node.call_post_process(), "call_post_process (workbench tail)")
 
     def _has_main_production_work_remaining(self) -> bool:
         """True when the AMR still has useful work to overlap with WB RECYCLE."""
@@ -348,7 +386,7 @@ class Executor:
                 and self._node.is_docked_at_station(workbench_id)
             )
             if after_docked and not before_docked:
-                self._node.call_post_process()
+                self._soft(self._node.call_post_process(), "call_post_process (recycle outputs)")
                 self._start_ready_intransit_assembly()
 
     def _collect_recycled_materials(
@@ -440,20 +478,41 @@ class Executor:
         if not ready:
             return
 
+        # A finished product rides on cargo 1 to the customer; cargo 1 holds
+        # only one product at a time. Collect at most as many as cargo 1 can
+        # take — the rest stay pending on the WB shelf (their handle.event is
+        # already set, so the next collect call after a delivery frees
+        # cargo 1 picks them up immediately).
+        collectable = []
+        for handle in ready:
+            occupied = (
+                hasattr(self._node, 'cargo1_is_occupied')
+                and self._node.cargo1_is_occupied()
+            )
+            if occupied or collectable:
+                self._pending_wb_produce.append(handle)
+            else:
+                collectable.append(handle)
+        if not collectable:
+            self._log(
+                "  → cargo 1 occupied; leaving finished WB products on shelf for now"
+            )
+            return
+
         wid = self._plan.workbench_station_id
         self._log(
-            f"  → collect WB-produced products {[h.product_id for h in ready]}"
+            f"  → collect WB-produced products {[h.product_id for h in collectable]}"
         )
         self._ensure_docked_at_station(wid, "collect WB-produced products")
-        for handle in ready:
-            if not self._node.arm_pick_product(
-                station_id=wid, product_id=handle.product_id
-            ):
-                raise ExecutionFailure(
-                    f"Failed to pick WB-produced product {handle.product_id}"
-                )
+        for handle in collectable:
+            self._require(
+                self._node.arm_pick_product(
+                    station_id=wid, product_id=handle.product_id
+                ),
+                f"arm_pick_product(WB product={handle.product_id})",
+            )
             self._wb_products_onboard.append(handle.product_id)
-        self._node.call_post_process()
+        self._soft(self._node.call_post_process(), "call_post_process (wb collect)")
         self._start_ready_workbench_production()
 
     def _pick_needed_workbench_materials_for_amr(self, workbench_id: int) -> None:
@@ -582,7 +641,7 @@ class Executor:
             and self._node.is_docked_at_station(wid)
         )
         if after_docked and not before_docked:
-            self._node.call_post_process()
+            self._soft(self._node.call_post_process(), "call_post_process (wb recovery)")
 
     # ------------------------------------------------------------------
     # Return surplus recycled materials to their designated storage station
@@ -641,22 +700,23 @@ class Executor:
             return
 
         self._log(f"Returning surplus recycled materials: {surplus}")
+        self._return_grouped_materials(by_station, 'return-surplus-storage')
+
+    def _return_grouped_materials(self, by_station: Dict[int, List[int]], label: str) -> None:
+        """Drive to each destination station once and return the given materials."""
         for station_id, mat_ids in by_station.items():
             self._log(f"  → navigate to storage {station_id} to return {mat_ids}")
-            self._node.navigate_subgoal(station_id)
-            self._wait_for_intransit_assembly()
-            self._node.navigate_goal(station_id)
+            self._approach(station_id)
             for mat_id in mat_ids:
-                ok = self._node.arm_return_material_to_storage(
-                    material_id=mat_id, station_id=station_id
+                self._require(
+                    self._node.arm_return_material_to_storage(
+                        material_id=mat_id, station_id=station_id,
+                    ),
+                    f"arm_return_material_to_storage(material={mat_id}, station={station_id})",
                 )
-                if not ok:
-                    raise ExecutionFailure(
-                        f"Failed to return material {mat_id} to storage {station_id}"
-                    )
                 self._ledger.add(station_id, mat_id)
-            self._log_ledger(f"return-surplus-storage-{station_id}")
-            self._node.call_post_process()
+            self._log_ledger(f"{label}-{station_id}")
+            self._soft(self._node.call_post_process(), "call_post_process (return storage)")
 
     # ------------------------------------------------------------------
     # Phase 2 — Main pickup loop
@@ -705,39 +765,34 @@ class Executor:
                 f"[{idx}/{len(storage_entries)-1}] navigate to storage station {sid}"
             )
 
-            self._node.navigate_subgoal(sid)
-            self._wait_for_intransit_assembly()
-            self._node.navigate_goal(sid)
+            self._approach(sid)
             self._return_matching_surplus_at_station(sid)
 
             needs_revisit = False
             for mat_id in entry.get('pickup_materials', []):
                 if self._node.cargo_is_full():
                     self._log("  ! cargo 2-6 full — overflow drop at workbench")
-                    self._node.call_post_process()
+                    self._soft(self._node.call_post_process(), "call_post_process (pre-overflow)")
                     self._overflow_drop_at_workbench()
                     # Must revisit the station after returning from workbench.
                     needs_revisit = True
 
                 if needs_revisit:
-                    self._node.navigate_subgoal(sid)
-                    self._wait_for_intransit_assembly()
-                    self._node.navigate_goal(sid)
+                    self._approach(sid)
                     needs_revisit = False
 
                 self._log(f"  → pick mat {mat_id}")
-                ok = self._node.arm_pick_material(station_id=sid, material_id=mat_id)
-                if not ok:
-                    raise ExecutionFailure(
-                        f"Failed to pick material {mat_id} from station {sid}"
-                    )
+                self._require(
+                    self._node.arm_pick_material(station_id=sid, material_id=mat_id),
+                    f"arm_pick_material(station={sid}, material={mat_id})",
+                )
                 self._ledger.remove(sid, mat_id)
 
             # Start cargo ASSEMBLE before the exit maneuver so the arm can
             # work during backup/rotation and continue while driving to the
             # next station.
             self._start_ready_intransit_assembly()
-            self._node.call_post_process()
+            self._soft(self._node.call_post_process(), "call_post_process (storage)")
             self._collect_ready_recycle_outputs(block=False)
 
             has_more_pickups = (idx < len(storage_entries) - 1)
@@ -816,17 +871,17 @@ class Executor:
 
         wid = self._plan.workbench_station_id
         self._log(f"  → overflow drop: navigate to workbench {wid}")
-        self._node.navigate_subgoal(wid)
-        self._wait_for_intransit_assembly()
-        self._node.navigate_goal(wid)
+        self._approach(wid)
         dropped = self._node.cargo_materials_snapshot()
-        if not self._node.arm_unload_all_materials():
-            raise ExecutionFailure("Failed to unload overflow materials at workbench")
+        self._require(
+            self._node.arm_unload_all_materials(),
+            "arm_unload_all_materials (overflow drop)",
+        )
         for _, mat_id in dropped:
             self._ledger.add(wid, mat_id)
         self._log_ledger('overflow-drop')
         self._start_ready_workbench_production()
-        self._node.call_post_process()
+        self._soft(self._node.call_post_process(), "call_post_process (overflow)")
 
         self._en_route_to_wb = False
 
@@ -886,6 +941,12 @@ class Executor:
         while True:
             self._start_ready_intransit_assembly()
             if not self._has_ready_deliveries(include_pending_arm=True):
+                # A finished WB product may still be on the shelf because
+                # cargo 1 was occupied when it completed — collect it now
+                # that everything onboard has been delivered.
+                if self._pending_wb_produce:
+                    self._collect_ready_workbench_products(block=True)
+                    continue
                 return
             self._deliver_all()
             self._collect_ready_workbench_products(block=False)
@@ -907,22 +968,19 @@ class Executor:
             )
         else:
             self._log(f"  → navigate to customer {cid}")
-        self._node.navigate_subgoal(cid)
-        self._wait_for_intransit_assembly()
-        self._node.navigate_goal(cid)
+        self._approach(cid)
 
         # Deliver each completed in-transit slot directly from cargo 7/8.
         for slot in list(self._allocator.get_completed_slots()):
             self._log(
                 f"  → deliver product {slot.product_id} from cargo {slot.cargo_id}"
             )
-            if not self._node.arm_deliver(
-                product_id=slot.product_id,
-                from_cargo_id=slot.cargo_id,
-            ):
-                raise ExecutionFailure(
-                    f"Failed to deliver product {slot.product_id} from cargo {slot.cargo_id}"
-                )
+            self._require(
+                self._node.arm_deliver(
+                    product_id=slot.product_id, from_cargo_id=slot.cargo_id,
+                ),
+                f"arm_deliver(product={slot.product_id}, cargo={slot.cargo_id})",
+            )
             self._started_intransit.discard(slot.cargo_id)
             newly_queued = self._allocator.free_slot(slot.cargo_id)
             if newly_queued is not None:
@@ -932,14 +990,88 @@ class Executor:
 
         for product_id in wb_onboard:
             self._log(f"  → deliver WB-produced product {product_id}")
-            if not self._node.arm_deliver(product_id=product_id, from_cargo_id=0):
-                raise ExecutionFailure(
-                    f"Failed to deliver WB-produced product {product_id}"
-                )
+            self._require(
+                self._node.arm_deliver(product_id=product_id, from_cargo_id=0),
+                f"arm_deliver(WB product={product_id})",
+            )
             self._wb_products_onboard.remove(product_id)
 
-        self._node.call_post_process()
+        self._soft(self._node.call_post_process(), "call_post_process (delivery)")
         self._start_ready_intransit_assembly()
+
+    # ------------------------------------------------------------------
+    # Deferred recycle — produce-then-recycle products with no initial
+    # customer-counter stock (run after delivery, before returning home)
+    # ------------------------------------------------------------------
+
+    def _run_deferred_recycle_phase(self) -> None:
+        """Recycle products that had to be assembled and delivered first.
+
+        These share a product id with a produce order, but had no matching
+        stock on the customer counter at plan time — so there was nothing
+        to disassemble in Phase 1. Now that the freshly-assembled product
+        has been delivered to the customer, pick it back up, disassemble it
+        at the workbench, and return every reclaimed material directly to
+        its home storage station (production is already done, so nothing
+        else needs these materials).
+        """
+        deferred_ids = self._plan.deferred_recycle_ids
+        if not deferred_ids:
+            return
+
+        self._log(f"Deferred recycle phase: {len(deferred_ids)} product(s)")
+        customer_id = self._plan.customer_station_id
+        workbench_id = self._plan.workbench_station_id
+
+        for pid in deferred_ids:
+            self._log(f"  → navigate to customer station {customer_id} to reclaim product {pid}")
+            self._approach(customer_id)
+            self._require(
+                self._node.arm_pick_product(station_id=customer_id, product_id=pid),
+                f"arm_pick_product(station={customer_id}, product={pid})",
+            )
+            self._soft(self._node.call_post_process(), "call_post_process (deferred pickup)")
+
+            self._log(f"  → navigate to workbench {workbench_id} for RECYCLE")
+            self._approach(workbench_id)
+            self._require(
+                self._node.arm_unload_product_to_workbench(
+                    product_id=pid, station_id=workbench_id,
+                ),
+                f"arm_unload_product_to_workbench(product={pid}, station={workbench_id})",
+            )
+            handle = self._node.wb_task_async('RECYCLE', pid)
+            # Nothing else to fetch while this disassembles (deferred recycle
+            # runs one product at a time) — retreat to the sub_goal to wait
+            # instead of idling docked at the goal.
+            self._require(
+                self._node.navigate_subgoal(workbench_id),
+                f"navigate_subgoal({workbench_id})",
+            )
+            if not self._node.wait_for_wb_task(handle):
+                raise ExecutionFailure(f"Deferred RECYCLE failed: product={pid}")
+            self._require(
+                self._node.navigate_goal(workbench_id),
+                f"navigate_goal({workbench_id})",
+            )
+            for mat_id, cnt in get_material_count(pid).items():
+                for _ in range(cnt):
+                    self._log(f"    ← pick recycled mat {mat_id} from workbench")
+                    self._require(
+                        self._node.arm_pick_material(
+                            station_id=workbench_id, material_id=mat_id,
+                        ),
+                        f"arm_pick_material(station={workbench_id}, material={mat_id})",
+                    )
+            self._soft(self._node.call_post_process(), "call_post_process (deferred recycle)")
+
+            by_station: Dict[int, List[int]] = {}
+            for mat_id, cnt in get_material_count(pid).items():
+                station_id = self._plan.material_home_station.get(
+                    mat_id, workbench_id
+                )
+                by_station.setdefault(station_id, []).extend([mat_id] * cnt)
+            self._return_grouped_materials(by_station, f'deferred-recycle-return-{pid}')
 
     # ------------------------------------------------------------------
     # Return to home
@@ -949,9 +1081,7 @@ class Executor:
         """Navigate back to the home station (0 for A-side, 14 for B-side)."""
         home_id = self._plan.home_station_id
         self._log(f"Returning to home station {home_id}")
-        self._node.navigate_subgoal(home_id)
-        self._wait_for_intransit_assembly()
-        self._node.navigate_goal(home_id)
+        self._approach(home_id)
         self._log(f"Arrived at home station {home_id} — mission complete")
         current = self._node.get_current_station_id()
         if current is not None and current != home_id:
@@ -966,13 +1096,40 @@ class Executor:
     # Utility
     # ------------------------------------------------------------------
 
+    def _require(self, ok: bool, desc: str) -> None:
+        """Raise ExecutionFailure if a required call did not succeed, instead
+        of silently continuing with a plan that no longer matches physical
+        reality."""
+        if not ok:
+            raise ExecutionFailure(f"{desc} failed")
+
+    def _soft(self, ok: bool, desc: str) -> None:
+        """Log (but don't abort on) failure of a best-effort call, e.g. the
+        post-process exit maneuver — its own failure shouldn't stop the
+        mission, but should be visible rather than silently swallowed."""
+        if not ok:
+            self._node.get_logger().warning(f"[Executor] {desc} did not succeed (continuing)")
+
+    def _approach(self, station_id: int) -> None:
+        """Approach station_id following the two-phase navigation rule.
+
+        Always route through the sub_goal (open-space) leg before the
+        precision-parking goal leg, and drain any in-transit ASSEMBLE so the
+        arm is guaranteed idle before docking. This is the only sanctioned
+        way to reach a station's docking goal — calling navigate_goal()
+        directly skips the transit window for in-transit assembly and risks
+        a close-quarters, bad-heading redock (e.g. from a post_process exit
+        pose), which is how the recycle-phase AMR mispositioning bug arose.
+        """
+        self._require(self._node.navigate_subgoal(station_id), f"navigate_subgoal({station_id})")
+        self._wait_for_intransit_assembly()
+        self._require(self._node.navigate_goal(station_id), f"navigate_goal({station_id})")
+
     def _ensure_docked_at_station(self, station_id: int, reason: str) -> None:
         if hasattr(self._node, 'is_docked_at_station') and self._node.is_docked_at_station(station_id):
             return
         self._log(f"  → redock station {station_id} before {reason}")
-        self._node.navigate_subgoal(station_id)
-        self._wait_for_intransit_assembly()
-        self._node.navigate_goal(station_id)
+        self._approach(station_id)
 
     def _log_ledger(self, label: str) -> None:
         self._node.get_logger().info(

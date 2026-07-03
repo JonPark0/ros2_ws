@@ -72,19 +72,19 @@ PRODUCTS: dict = {
     },
     # --- Workbench-only: contain side-by-side layers ---
     8518: {
-        'name': 'Big Tree',
+        'name': 'Burger',
         'workbench_only': True,
         # Bottom layer: [8], middle: [5, 1] side-by-side, top: [8]
         'layers': [[8], [5, 1], [8]],
     },
     46262: {
-        'name': 'Ice Cream',
+        'name': 'Big Tree',
         'workbench_only': True,
         # Bottom: [4], then [6,2] side-by-side, then [6], top: [2]
         'layers': [[4], [6, 2], [6], [2]],
     },
     48132: {
-        'name': 'Burger',
+        'name': 'Ice Cream',
         'workbench_only': True,
         # Bottom: [4], then [8], then [1,3] side-by-side, top: [2]
         'layers': [[4], [8], [1, 3], [2]],

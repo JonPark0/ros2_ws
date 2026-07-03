@@ -7,13 +7,20 @@ robocup_planner:
     arm_service: "/amr_robot_command"
     wb_ready_topic: "/workbench/product_ready"
     post_process_service: "/robocup_navigator/post_process"
+    cmd_vel_topic: "cmd_vel"
+    wb_recycle_wait_mode: "auto"     # auto: 마지막 recycle은 WB 옆 대기, always/never 선택 가능
+    wb_produce_parallelism: 2          # workbench 로봇팔 2대 기준
+    wb_clearance_backup_distance: 0.10 # WB 대기 시 회전 없이 10cm 후진
+    wb_clearance_backup_speed: 0.10
+    motion_period_sec: 0.05
+    product_weights_json: ""
     driving_velocity: 0.5
     parking_duration: 1.5
     exiting_duration: 1.0
     # Debug: export full plan result to JSON file before execution.
     # Set debug_export_dir to an absolute path to override the default (/tmp/robocup_planner).
     debug_export: true
-    debug_export_dir: "/home/st02/ros2_ws/logs/planner/"
+    debug_export_dir: "/tmp/robocup_planner"
 
 order_server:
   ros__parameters:

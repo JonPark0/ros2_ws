@@ -105,9 +105,9 @@ cargo 7/8에는 `is_intransit_eligible` 조건을 만족하는 제품만 할당�
 | `wb_action` | `wb_task` | 워크벤치 액션 이름 |
 | `arm_service` | `/amr_robot_command` | 로봇팔 서비스 이름 |
 | `wb_ready_topic` | `/workbench/product_ready` | 워크벤치 완료 토픽 |
-| `waypoint_yaml` | `/home/st02/ros2_ws/src/robocup_navigator/params/robocup_waypoint.yaml` | 웨이포인트 YAML 경로 (robocup_navigator 팀의 원본 파일) |
+| `waypoint_yaml` | *(ament_index 자동 해석)* | 웨이포인트 YAML 경로 |
 
-`waypoint_yaml`은 `params.yaml`에 명시된 경로(`robocup_navigator`의 원본 웨이포인트 파일)를 그대로 사용합니다. 경로를 비워두면 `robocup_planner` 패키지에 번들된 `config/robocup_waypoint.yaml`(빌드 시 `share/robocup_planner/config/`에 설치됨)로 `ament_index` 자동 해석됩니다.
+`waypoint_yaml`은 빌드 시 `config/robocup_waypoint.yaml`을 `share/robocup_planner/config/`에 설치하며, 노드 시작 시 `ament_index`로 자동 해석합니다.
 
 ---
 

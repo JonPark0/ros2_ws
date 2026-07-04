@@ -535,11 +535,13 @@ class Executor:
         for mat_id in to_pick:
             if self._ledger.count(workbench_id, mat_id) <= 0:
                 continue
-            if self._node.cargo_is_full():
-                self._log(
-                    "  ! cargo full; leaving remaining recycled materials on WB"
-                )
-                return
+            if not self._node.cargo_has_space_for(mat_id):
+                if not self._try_free_cargo_space(mat_id):
+                    self._log(
+                        f"  ! no cargo space for mat {mat_id}; "
+                        "leaving it on the WB shelf (ledger keeps it)"
+                    )
+                    continue
             self._log(f"    ← pick recycled mat {mat_id} for AMR assembly")
             ok = self._node.arm_pick_material(
                 station_id=workbench_id, material_id=mat_id
@@ -549,12 +551,29 @@ class Executor:
                     f"Failed to pick recycled material {mat_id} from workbench {workbench_id}"
                 )
             self._ledger.remove(workbench_id, mat_id)
+            # Consume complete sets into cargo 7/8 as they arrive.
+            self._start_ready_intransit_assembly()
         self._log_ledger('pick-wb-materials-for-amr')
 
     def _pick_surplus_workbench_materials_for_return(self, workbench_id: int) -> None:
-        """Pick WB surplus materials so they can be returned on route."""
+        """Pick WB surplus materials so they can be returned on route.
+
+        Only loads surplus once no production work remains: surplus riding
+        in cargo 2-6 through the pickup phase is dead weight that starves
+        the slots needed for production materials (the 2026-07-04 field run
+        entered Phase 2 with 20/30 units of mostly-surplus cargo and could
+        not fit its 4x2 pickups). While work remains, surplus stays on the
+        WB shelf — the ledger tracks it and _return_surplus_materials()
+        fetches it at mission end.
+        """
         buffered = self._ledger.snapshot().get(workbench_id, {})
         if not buffered:
+            return
+
+        if self._has_main_production_work_remaining():
+            self._log(
+                "  → leaving surplus on WB shelf for now; production work remains"
+            )
             return
 
         # Keep any material still needed for AMR production on the WB ledger.
@@ -659,43 +678,86 @@ class Executor:
         if not surplus:
             return
 
+        wid = self._plan.workbench_station_id
         cargo_counts = Counter(
             mat_id for _, mat_id in self._node.cargo_materials_snapshot()
         )
         protected_for_produce = self._remaining_product_material_need()
 
-        # Group by destination station so each station is visited once.
-        # If overflow buffering already placed some surplus on the workbench,
-        # do not command the arm to unload blocks that are no longer in cargo.
-        # Also keep cargo materials that are still needed by AMR cargo assembly.
-        by_station: Dict[int, List[int]] = {}
-        skipped: Dict[int, int] = {}
+        # Split each surplus material into: already in cargo / still buffered
+        # on the WB shelf (deliberately left there during the mission so it
+        # never squeezed cargo space) / genuinely unaccounted. Keep cargo
+        # materials that are still needed by AMR cargo assembly.
+        available_in_cargo: Dict[int, int] = {}
+        fetch_from_wb: Dict[int, int] = {}
         kept_for_produce: Dict[int, int] = {}
+        skipped: Dict[int, int] = {}
         for mat_id, cnt in surplus.items():
+            mat_id = int(mat_id)
             in_cargo = int(cargo_counts.get(mat_id, 0))
             protect = min(in_cargo, int(protected_for_produce.get(mat_id, 0)))
             if protect > 0:
-                kept_for_produce[int(mat_id)] = protect
-            available = min(int(cnt), max(0, in_cargo - protect))
-            missing = int(cnt) - available
+                kept_for_produce[mat_id] = protect
+            take_cargo = min(int(cnt), max(0, in_cargo - protect))
+            if take_cargo > 0:
+                available_in_cargo[mat_id] = take_cargo
+
+            missing = int(cnt) - take_cargo
+            destination = self._plan.material_home_station.get(mat_id)
+            if missing > 0 and destination is not None and destination != wid:
+                fetch = min(missing, self._ledger.count(wid, mat_id))
+                if fetch > 0:
+                    fetch_from_wb[mat_id] = fetch
+                missing -= fetch
             if missing > 0:
-                skipped[int(mat_id)] = missing
-            if available <= 0:
-                continue
-            station_id = self._plan.material_home_station.get(
-                mat_id, self._plan.workbench_station_id
-            )
-            by_station.setdefault(station_id, []).extend([mat_id] * available)
+                skipped[mat_id] = missing
 
         if kept_for_produce:
             self._log(
                 f"  → keeping recycled cargo materials for AMR produce: {kept_for_produce}"
             )
-
         if skipped:
             self._log(
-                f"  ! surplus not currently in cargo, leaving buffered: {skipped}"
+                f"  ! surplus neither in cargo nor on WB shelf, leaving: {skipped}"
             )
+
+        # Fetch the WB-buffered surplus now that cargo 2-6 is free.
+        fetched: Counter = Counter()
+        if fetch_from_wb:
+            self._log(
+                f"  → fetch buffered surplus from workbench {wid}: {fetch_from_wb}"
+            )
+            self._ensure_docked_at_station(wid, "fetch buffered surplus for return")
+            for mat_id, cnt in sorted(fetch_from_wb.items()):
+                for _ in range(cnt):
+                    if self._ledger.count(wid, mat_id) <= 0:
+                        break
+                    if not self._node.cargo_has_space_for(mat_id):
+                        self._log(
+                            f"  ! no cargo space for surplus mat {mat_id}; "
+                            "leaving the rest on the WB shelf"
+                        )
+                        break
+                    self._require(
+                        self._node.arm_pick_material(
+                            station_id=wid, material_id=mat_id
+                        ),
+                        f"arm_pick_material(station={wid}, material={mat_id}) (surplus)",
+                    )
+                    self._ledger.remove(wid, mat_id)
+                    fetched[mat_id] += 1
+            self._soft(self._node.call_post_process(), "call_post_process (surplus fetch)")
+            self._log_ledger('surplus-fetch-from-wb')
+
+        # Group by destination station so each station is visited once.
+        by_station: Dict[int, List[int]] = {}
+        for mat_id in sorted(set(available_in_cargo) | set(fetched)):
+            count = available_in_cargo.get(mat_id, 0) + fetched.get(mat_id, 0)
+            if count <= 0:
+                continue
+            station_id = self._plan.material_home_station.get(mat_id, wid)
+            by_station.setdefault(station_id, []).extend([mat_id] * count)
+
         if not by_station:
             return
 
@@ -770,12 +832,20 @@ class Executor:
 
             needs_revisit = False
             for mat_id in entry.get('pickup_materials', []):
-                if self._node.cargo_is_full():
-                    self._log("  ! cargo 2-6 full — overflow drop at workbench")
-                    self._soft(self._node.call_post_process(), "call_post_process (pre-overflow)")
-                    self._overflow_drop_at_workbench()
-                    # Must revisit the station after returning from workbench.
-                    needs_revisit = True
+                # Per-material space check: a 4x2 block needs 4 free units,
+                # which cargo_is_full() (2-unit check) cannot see. Prefer
+                # consuming loaded materials into a cargo 7/8 ASSEMBLE over
+                # a workbench overflow detour.
+                if not self._node.cargo_has_space_for(mat_id):
+                    if not self._try_free_cargo_space(mat_id):
+                        self._log(
+                            f"  ! no cargo space for mat {mat_id} — "
+                            "overflow drop at workbench"
+                        )
+                        self._soft(self._node.call_post_process(), "call_post_process (pre-overflow)")
+                        self._overflow_drop_at_workbench()
+                        # Must revisit the station after returning from workbench.
+                        needs_revisit = True
 
                 if needs_revisit:
                     self._approach(sid)
@@ -787,6 +857,9 @@ class Executor:
                     f"arm_pick_material(station={sid}, material={mat_id})",
                 )
                 self._ledger.remove(sid, mat_id)
+                # Use materials the moment a product's set completes so
+                # slots 2-6 drain into cargo 7/8 as pickups come in.
+                self._start_ready_intransit_assembly()
 
             # Start cargo ASSEMBLE before the exit maneuver so the arm can
             # work during backup/rotation and continue while driving to the
@@ -831,6 +904,31 @@ class Executor:
             return True
 
         return False
+
+    def _try_free_cargo_space(self, material_id: int) -> bool:
+        """Free cargo 2-6 space for material_id by consuming loaded materials
+        into an in-transit ASSEMBLE right now.
+
+        Assembling moves a complete material set from slots 2-6 onto cargo
+        7/8, so it is the preferred way to make room — materials get used
+        the moment their product's set is complete instead of piling up.
+        Falls through (returns False) when nothing is ready to assemble and
+        nothing is already assembling; callers then overflow-drop or leave
+        the material where it is.
+        """
+        for _ in range(3):  # at most: drain pending, then slots 7 and 8
+            if self._node.cargo_has_space_for(material_id):
+                return True
+            started = self._start_ready_intransit_assembly()
+            pending = self._node.has_pending_intransit_assembly()
+            if not started and not pending:
+                return False
+            self._log(
+                f"  → cargo has no space for mat {material_id}; "
+                "assembling loaded materials to free slots"
+            )
+            self._wait_for_intransit_assembly()
+        return self._node.cargo_has_space_for(material_id)
 
     def _wait_for_intransit_assembly(self) -> None:
         """Block until arm is idle; drain any newly-ready assemblies."""
@@ -881,6 +979,10 @@ class Executor:
             self._ledger.add(wid, mat_id)
         self._log_ledger('overflow-drop')
         self._start_ready_workbench_production()
+        # Take back the dropped materials still needed for AMR production —
+        # cargo is empty now, so they fit. Without this they'd be stranded
+        # on the shelf and their products would never assemble.
+        self._pick_needed_workbench_materials_for_amr(wid)
         self._soft(self._node.call_post_process(), "call_post_process (overflow)")
 
         self._en_route_to_wb = False

@@ -46,6 +46,13 @@ from eai_task_server.order import (
 
 
 VALID_MATERIAL_IDS = set(RAW_MATERIAL_IDS) | {10, 20, 30, 40, 50, 60, 70, 80, 90}
+# YAML station_type 이름 ↔ sml_messages/Station 상수 매핑 (stations: 명시 모드용)
+STATION_TYPE_NAMES = {
+    "storage": Station.ST_STORAGE,
+    "workbench": Station.ST_WORKBENCH,
+    "customer": Station.ST_CUSTOMER,
+    "hybrid": Station.ST_HYBRID,
+}
 TASK_QOS = QoSProfile(
     depth=1,
     durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -281,12 +288,13 @@ def prompt_customer_initial_ids(recycle_ids: Sequence[int]) -> List[int]:
 
 def prompt_station_materials(side: str) -> Dict[int, List[int]]:
     layout = SIDE_LAYOUT[side]
-    storage_ids = tuple(layout["storage_ids"])
+    # 실제 경기장은 hybrid station에도 batch 재고를 두므로 함께 입력받는다.
+    storage_ids = tuple(layout["storage_ids"]) + tuple(layout["hybrid_ids"])
     out: Dict[int, List[int]] = {}
 
     print("")
     print(color("[Station Material Input]", MAGENTA + BOLD))
-    print("현재 환경에서는 storage/shared storage station에만 초기 material_ids를 둡니다.")
+    print("storage/shared/hybrid station에 초기 material_ids를 둘 수 있습니다.")
     print("개별 재료는 1~8, known batch는 10/20/.../80, mix batch는 90입니다.")
     print("비워두면 해당 station material_ids=[] 입니다.")
 
@@ -374,7 +382,7 @@ def build_task(
                 Station.ST_HYBRID,
                 station_name(side, Station.ST_HYBRID, station_id, idx),
                 station_id,
-                [],
+                material_by_station.get(station_id, []),
             )
         )
 
@@ -532,6 +540,118 @@ def load_order_config(order_file: str) -> Dict:
     return config
 
 
+def _parse_station_type(raw) -> int:
+    """Accept station_type as a name ("storage") or the Station constant int."""
+    if isinstance(raw, int):
+        if raw in STATION_TYPE_NAMES.values():
+            return raw
+        raise ValueError(f"알 수 없는 station_type 값: {raw}")
+    key = str(raw).strip().lower()
+    if key not in STATION_TYPE_NAMES:
+        raise ValueError(
+            f"알 수 없는 station_type: {raw!r} (허용: {sorted(STATION_TYPE_NAMES)})"
+        )
+    return STATION_TYPE_NAMES[key]
+
+
+def build_task_from_station_list(
+    side: str,
+    produce_ids: Sequence[int],
+    recycle_ids: Sequence[int],
+    customer_initial_ids: Optional[Sequence[int]],
+    stations_cfg: Sequence[Dict],
+) -> tuple[Task, Dict[int, List[int]], int, int, List[int]]:
+    """Build a task from an explicit `stations:` list in the order file.
+
+    The hardcoded SIDE_LAYOUT cannot express every real arena (e.g. the
+    2026-07-04 field task typed station 3 as ST_STORAGE with batch stock and
+    had no second workbench / shared storage at all), so this mode publishes
+    exactly the stations the file lists — station_id, station_type,
+    material_ids — with nothing added or reordered.
+    """
+    if not isinstance(stations_cfg, (list, tuple)) or not stations_cfg:
+        raise ValueError("stations는 비어 있지 않은 리스트여야 합니다")
+
+    stations: List[Station] = []
+    material_by_station: Dict[int, List[int]] = {}
+    type_index: Dict[int, int] = {}
+    workbench_ids: List[int] = []
+    customer_entries: List[tuple[int, List[int]]] = []
+    seen_ids: set = set()
+
+    for entry in stations_cfg:
+        if not isinstance(entry, dict):
+            raise ValueError(f"stations 항목은 mapping이어야 합니다: {entry!r}")
+        if "station_id" not in entry or "station_type" not in entry:
+            raise ValueError(f"stations 항목에는 station_id와 station_type이 필요합니다: {entry!r}")
+        station_id = int(entry["station_id"])
+        if station_id in seen_ids:
+            raise ValueError(f"station_id가 중복되었습니다: {station_id}")
+        seen_ids.add(station_id)
+        station_type = _parse_station_type(entry["station_type"])
+        material_ids = [int(m) for m in (entry.get("material_ids") or [])]
+
+        if station_type in (Station.ST_STORAGE, Station.ST_HYBRID):
+            invalid = [m for m in material_ids if m not in VALID_MATERIAL_IDS]
+            if invalid:
+                raise ValueError(
+                    f"station {station_id}: 허용되지 않는 material_id: {invalid}"
+                )
+            material_by_station[station_id] = material_ids
+        elif station_type == Station.ST_CUSTOMER:
+            customer_entries.append((station_id, material_ids))
+        elif station_type == Station.ST_WORKBENCH:
+            workbench_ids.append(station_id)
+            if material_ids:
+                raise ValueError(
+                    f"workbench station {station_id}에는 material_ids를 둘 수 없습니다"
+                )
+
+        type_index[station_type] = type_index.get(station_type, 0) + 1
+        name = str(entry.get("name") or "").strip() or station_name(
+            side, station_type, station_id, type_index[station_type]
+        )
+        stations.append(make_station(station_type, name, station_id, material_ids))
+
+    if not workbench_ids:
+        raise ValueError("stations에 workbench station이 최소 1개 필요합니다")
+    if not customer_entries:
+        raise ValueError("stations에 customer station이 1개 필요합니다")
+    if len(customer_entries) > 1:
+        raise ValueError("customer station은 1개만 지원합니다")
+
+    selected_customer_id, customer_materials = customer_entries[0]
+    if customer_materials and customer_initial_ids is not None:
+        if sorted(customer_materials) != sorted(int(p) for p in customer_initial_ids):
+            raise ValueError(
+                "customer station의 material_ids와 customer_initial_ids가 다릅니다 — "
+                "둘 중 하나만 지정하세요"
+            )
+    if customer_materials:
+        effective_initial = [int(p) for p in customer_materials]
+    elif customer_initial_ids is not None:
+        effective_initial = [int(p) for p in customer_initial_ids]
+    else:
+        effective_initial = list(recycle_ids)
+    invalid_customer_ids = [pid for pid in effective_initial if pid not in recycle_ids]
+    if invalid_customer_ids:
+        raise ValueError(f"recycle 대상이 아닌 customer 초기 재고: {invalid_customer_ids}")
+
+    # customer station의 초기 재고를 확정값으로 채워 넣는다.
+    for station in stations:
+        if station.station_id == selected_customer_id:
+            station.material_ids = list(effective_initial)
+
+    task = Task()
+    task.order_list = [
+        make_order(Order.OT_PRODUCE, pid) for pid in produce_ids
+    ] + [
+        make_order(Order.OT_RECYCLE, pid) for pid in recycle_ids
+    ]
+    task.arena_layout = stations
+    return task, material_by_station, workbench_ids[0], selected_customer_id, effective_initial
+
+
 def build_task_from_config(config: Dict) -> tuple[Task, str, List[int], List[int], Dict[int, List[int]], int, int, List[int]]:
     side = str(config.get("side", "")).strip().lower()
     if side not in SIDES:
@@ -543,23 +663,50 @@ def build_task_from_config(config: Dict) -> tuple[Task, str, List[int], List[int
     if unknown:
         raise ValueError(f"알 수 없는 product_id: {unknown}")
 
-    customer_initial_ids = config.get("customer_initial_ids")
-    if customer_initial_ids is None:
+    raw_customer_initial = config.get("customer_initial_ids")
+
+    # 명시적 stations: 모드 — SIDE_LAYOUT을 무시하고 파일의 arena를 그대로 발행.
+    stations_cfg = config.get("stations")
+    if stations_cfg is not None:
+        (
+            task,
+            material_by_station,
+            selected_workbench_id,
+            selected_customer_id,
+            customer_initial_ids,
+        ) = build_task_from_station_list(
+            side, produce_ids, recycle_ids, raw_customer_initial, stations_cfg
+        )
+        return (
+            task,
+            side,
+            produce_ids,
+            recycle_ids,
+            material_by_station,
+            selected_workbench_id,
+            selected_customer_id,
+            customer_initial_ids,
+        )
+
+    if raw_customer_initial is None:
         customer_initial_ids = list(recycle_ids)
     else:
-        customer_initial_ids = [int(pid) for pid in customer_initial_ids]
+        customer_initial_ids = [int(pid) for pid in raw_customer_initial]
     invalid_customer_ids = [pid for pid in customer_initial_ids if pid not in recycle_ids]
     if invalid_customer_ids:
         raise ValueError(f"recycle 대상이 아닌 customer_initial_ids: {invalid_customer_ids}")
 
     layout = SIDE_LAYOUT[side]
+    # 실제 경기장은 hybrid station에도 재고를 두므로 storage + hybrid 모두 허용.
+    material_station_ids = tuple(layout["storage_ids"]) + tuple(layout["hybrid_ids"])
     material_by_station: Dict[int, List[int]] = {}
     for raw_station_id, material_ids in (config.get("material_by_station") or {}).items():
         station_id = int(raw_station_id)
-        if station_id not in layout["storage_ids"]:
+        if station_id not in material_station_ids:
             raise ValueError(
                 f"material_by_station의 station_id={station_id}는 side {side!r}의 "
-                f"storage station이 아닙니다 (허용: {layout['storage_ids']})"
+                f"storage/hybrid station이 아닙니다 (허용: {material_station_ids}) — "
+                "다른 배치가 필요하면 stations: 명시 모드를 사용하세요"
             )
         parsed_material_ids = [int(mid) for mid in material_ids]
         invalid = [mid for mid in parsed_material_ids if mid not in VALID_MATERIAL_IDS]
@@ -636,6 +783,15 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         print("")
         print("manual_order_server interrupted")
+    except EOFError:
+        # Interactive prompts with no usable stdin (ros2 launch, piped run,
+        # or the two-order-file ambiguous fallback in a non-tty context).
+        node.get_logger().error(
+            "interactive 입력을 읽을 수 없습니다 (stdin 없음) — "
+            "order_file 파라미터로 YAML을 지정해 비대화형으로 실행하세요: "
+            "ros2 run eai_task_server manual_order_server --ros-args "
+            "-p order_file:=src/eai_task_server/orders/adv_lifecycle.yaml"
+        )
     finally:
         executor.shutdown()
         spin_thread.join(timeout=1.0)

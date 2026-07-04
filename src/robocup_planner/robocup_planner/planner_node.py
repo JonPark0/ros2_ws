@@ -920,6 +920,17 @@ class PlannerNode(Node):
         with self._cargo_lock:
             return not self._cargo.is_any_slot_available(1)
 
+    def cargo_has_space_for(self, material_id: int) -> bool:
+        """Return True if some cargo 2-6 slot can fit this specific material.
+
+        cargo_is_full() only answers for the smallest (2-unit) block; a 4x2
+        block (IDs 5-8, 4 units high) can have no fitting slot while
+        cargo_is_full() is still False — that gap silently lost pickups in
+        the 2026-07-04 field run, so space checks must be per-material.
+        """
+        with self._cargo_lock:
+            return self._cargo.is_any_slot_available(material_id)
+
     def arm_unload_all_materials(self) -> bool:
         """Unload every material in cargo 2-6 to the current workbench (overflow buffer)."""
         with self._cargo_lock:
@@ -1352,7 +1363,23 @@ class PlannerNode(Node):
         return False
 
     def arm_pick_material(self, station_id: int, material_id: int) -> bool:
-        """Pick one material block from a storage station and place it on cargo."""
+        """Pick one material block from a storage station and place it on cargo.
+
+        Refuses the pick up front when no cargo 2-6 slot can hold this
+        material, and fails loudly if the post-pick placement finds no slot
+        anyway — a block that is physically on board but untracked would
+        otherwise silently break cargo_has_all_materials() and the product
+        it belongs to would never assemble.
+        """
+        with self._cargo_lock:
+            if not self._cargo.is_any_slot_available(material_id):
+                self.get_logger().error(
+                    f"[CARGO] Refusing to pick material {material_id}: no cargo "
+                    "2-6 slot has space — caller must free space first "
+                    "(assemble or overflow-drop)"
+                )
+                return False
+
         success = self._arm_call(
             ARM_PICK,
             object_ids=[material_id],
@@ -1361,7 +1388,12 @@ class PlannerNode(Node):
         )
         if success:
             with self._cargo_lock:
-                self._cargo.place_material(material_id)
+                if self._cargo.place_material(material_id) is None:
+                    self.get_logger().error(
+                        f"[CARGO] No slot for picked material {material_id} — "
+                        "planner cargo state has diverged from the arm"
+                    )
+                    return False
         return success
 
     def arm_pick_product(self, station_id: int, product_id: int) -> bool:

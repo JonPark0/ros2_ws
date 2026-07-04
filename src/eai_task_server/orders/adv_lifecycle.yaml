@@ -1,31 +1,31 @@
-# Example order file for eai_task_server's manual_order_server.
+# Advanced-lifecycle order for eai_task_server's manual_order_server.
+#
+# Reproduces the 2026-07-04 field task exactly (see the planner debug export
+# plan_20260704_212147_575.json): storage stations 1/2/3 stocked with known
+# batches, single workbench 4, customer 6 pre-loaded with all three recycle
+# products (immediate recycle). Uses the explicit `stations:` mode because
+# this arena does not match the hardcoded SIDE_LAYOUT (station 3 is typed
+# ST_STORAGE with batch stock; there is no workbench 5 / shared storage 7).
 #
 # Usage:
-#   ros2 run eai_task_server manual_order_server --ros-args -p order_file:=src/eai_task_server/orders/example_order.yaml
-#
-# order_file is resolved relative to the current working directory the
-# command is run from (not relative to this package).
+#   ros2 run eai_task_server manual_order_server --ros-args -p order_file:=src/eai_task_server/orders/adv_lifecycle.yaml
 
-# side: "a" or "b"
 side: a
 
-# product_id list to PRODUCE (see PRODUCTS in eai_task_server/order.py for the catalog)
+# product_id list to PRODUCE (81 E-Stop, 711 Hammer, 8518 Burger)
 produce_ids: [81, 711, 8518]
 
-# product_id list to RECYCLE
+# product_id list to RECYCLE (241 Traffic Light, 462 Small Tree, 48132 Ice Cream)
 recycle_ids: [241, 462, 48132]
 
-# Which recycle_ids are already sitting on the customer counter at plan time.
-# Anything in recycle_ids but NOT listed here is treated as a "deferred"
-# recycle (produce -> deliver -> reclaim -> disassemble).
-# Omit this key entirely to default to "all recycle_ids are immediate".
-customer_initial_ids: [241, 462, 48132]
-
-# Initial material_ids per storage station, keyed by station_id.
-# Only storage/shared-storage stations for the selected side accept
-# material_ids (side a: 1, 2, 7 / side b: 12, 13, 7).
-# Individual materials are 1-8, known batches are 10/20/.../80, mix batch is 90.
-material_by_station:
-  1: [7, 1]
-  2: [6, 2, 4]
-  7: [5, 8, 3]
+# Explicit arena layout. station_type: storage | workbench | hybrid | customer.
+# Known batches are 10/20/.../80 (5 blocks of material batch_id/10 each).
+# The customer station's material_ids are its initial product stock — every
+# recycle_id listed there is an "immediate" recycle; recycle_ids missing from
+# it become deferred (produce -> deliver -> reclaim -> disassemble).
+stations:
+  - {station_id: 1, station_type: storage, material_ids: [10, 70]}
+  - {station_id: 2, station_type: storage, material_ids: [20, 40, 60]}
+  - {station_id: 3, station_type: storage, material_ids: [30, 50, 80]}
+  - {station_id: 4, station_type: workbench}
+  - {station_id: 6, station_type: customer, material_ids: [48132, 462, 241]}

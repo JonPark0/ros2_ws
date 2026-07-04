@@ -1183,8 +1183,29 @@ class PlannerNode(Node):
         with self._intransit_lock:
             self._intransit_events.append(handle)
 
+        # Claim the blocks from the tracker NOW, not on completion. While an
+        # ASSEMBLE is in flight its blocks are physically with the arm: if
+        # they stayed in the tracker, (a) availability/surplus math would
+        # count them as usable — the 2026-07-05 field run counted 711's
+        # in-flight 1-blocks as available to 8518, skipped a needed shelf
+        # pick, and stranded the Burger undelivered — and (b) a second
+        # ASSEMBLE started meanwhile could capture the same physical block
+        # (its completion-removal then no-ops, leaving a phantom block in
+        # the tracker). On failure the blocks are physically still on cargo
+        # 2-6, so they are placed back.
         with self._cargo_lock:
             materials_to_consume = self._cargo.find_materials_for_product(product_id) or []
+            for c_id, mat_id in materials_to_consume:
+                self._cargo.remove_material(c_id, mat_id)
+
+        def _restore_claimed_materials():
+            with self._cargo_lock:
+                for _c_id, mat_id in materials_to_consume:
+                    if self._cargo.place_material(mat_id) is None:
+                        self.get_logger().error(
+                            f"[CARGO] Could not restore material {mat_id} after "
+                            f"failed ASSEMBLE {product_id} — tracker has diverged"
+                        )
 
         def _assemble():
             try:
@@ -1204,19 +1225,17 @@ class PlannerNode(Node):
                     max_retries=0,
                 )
                 handle.success = success
-                if success:
-                    with self._cargo_lock:
-                        for c_id, mat_id in materials_to_consume:
-                            self._cargo.remove_material(c_id, mat_id)
-                else:
+                if not success:
                     self.get_logger().warning(
                         f"[ARM] ASSEMBLE failed: product={product_id}"
                     )
+                    _restore_claimed_materials()
             except Exception as e:
                 handle.success = False
                 self.get_logger().error(
                     f"[ARM] ASSEMBLE exception: product={product_id}: {e}"
                 )
+                _restore_claimed_materials()
             finally:
                 handle.event.set()
 

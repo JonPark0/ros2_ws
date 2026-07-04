@@ -214,6 +214,12 @@ class Executor:
         self._collect_ready_workbench_products(block=True)
         self._deliver_until_idle()
 
+        # Safety net: nothing above may leave a cargo produce order behind.
+        # If one is still allocated/queued (a needed block was stranded on a
+        # shelf or a pick was lost), fetch its materials from wherever the
+        # ledger says they are and finish — fail loudly if that's impossible.
+        self._recover_stalled_intransit_products()
+
         # Lifecycle produce-then-recycle products: reclaim from the customer
         # counter now that they've been delivered, disassemble, and return
         # the materials to storage.
@@ -586,7 +592,12 @@ class Executor:
 
     def _returnable_cargo_surplus_by_station(self) -> Dict[int, List[int]]:
         """Cargo 2-6 materials not needed by remaining production, grouped by
-        their home storage station. Materials with no known home are omitted."""
+        their home storage station. Materials with no known home are omitted.
+
+        (Blocks claimed by an in-flight ASSEMBLE never appear in the cargo
+        snapshot — they are removed from the tracker at claim time — so a
+        surplus trip can never hand the arm's work-in-progress blocks away.)
+        """
         protected = self._remaining_product_material_need()
         by_station: Dict[int, List[int]] = {}
         for _, mat_id in self._node.cargo_materials_snapshot():
@@ -917,14 +928,18 @@ class Executor:
         return needed
 
     def _remaining_material_need(self) -> Counter:
-        """Materials still needed for products not yet assembled/delivered."""
+        """Materials still needed for products not yet assembled/delivered.
+
+        The cargo snapshot is authoritative: blocks claimed by an in-flight
+        ASSEMBLE are already removed from the tracker at claim time (see
+        PlannerNode.arm_assemble_intransit_async), so everything it reports
+        is genuinely available.
+        """
         needed = self._remaining_product_material_need()
-        for _, mat_id in self._node.cargo_materials_snapshot():
-            if needed.get(mat_id, 0) > 0:
-                needed[mat_id] -= 1
-                if needed[mat_id] <= 0:
-                    del needed[mat_id]
-        return needed
+        needed -= Counter(
+            mat_id for _, mat_id in self._node.cargo_materials_snapshot()
+        )
+        return +needed
 
     def _recover_workbench_buffered_materials(self) -> None:
         """Pick back needed materials that were temporarily unloaded to WB."""
@@ -1202,6 +1217,8 @@ class Executor:
             if product_id is None or cargo_id in self._started_intransit:
                 continue
             # Check if all required materials are available in cargo 2-6.
+            # (Blocks claimed by an in-flight ASSEMBLE are already removed
+            # from the tracker, so this can never double-claim them.)
             if not self._node.cargo_has_all_materials(product_id):
                 continue
 
@@ -1410,6 +1427,77 @@ class Executor:
 
         self._soft(self._node.call_post_process(), "call_post_process (delivery)")
         self._start_ready_intransit_assembly()
+
+    # ------------------------------------------------------------------
+    # Stalled-product recovery (end-of-mission safety net)
+    # ------------------------------------------------------------------
+
+    def _undelivered_intransit_products(self) -> List[int]:
+        """Cargo produce orders still allocated to a slot or queued."""
+        return self._allocator.allocated_products() + self._allocator.queued_products()
+
+    def _recover_stalled_intransit_products(self) -> None:
+        """Fetch missing materials and finish any stalled cargo produce order.
+
+        The main flow can strand a product when one of its blocks ends up
+        somewhere unplanned (the 2026-07-05 field run left a needed 1-block
+        buffered on the WB shelf and silently abandoned the Burger). The
+        ledger knows where every off-cargo block lives, so as long as the
+        arena still physically holds the materials this loop fetches them,
+        assembles, and delivers. If the products remain unfinishable, raise
+        instead of quietly returning home without them.
+        """
+        for _ in range(3):
+            remaining = self._undelivered_intransit_products()
+            if not remaining:
+                return
+
+            need = self._remaining_material_need()
+            if not need:
+                # Materials are already on board — drain assembly/delivery.
+                self._start_ready_intransit_assembly()
+                self._deliver_until_idle()
+                continue
+
+            groups = self._ledger.pick_plan(
+                need, self._node.get_current_station_id()
+            )
+            if not groups:
+                break  # arena has no source for the missing materials
+
+            self._log(
+                f"  ! recovery: products {remaining} still undelivered — "
+                f"fetching {dict(need)} from {[(sid, mats) for sid, mats in groups]}"
+            )
+            for station_id, mats in groups:
+                self._approach(station_id)
+                for mat_id in _tall_blocks_first(mats):
+                    if self._ledger.count(station_id, mat_id) <= 0:
+                        continue
+                    if not self._node.cargo_has_space_for(mat_id):
+                        if not self._try_free_cargo_space(mat_id):
+                            self._log(
+                                f"  ! recovery: no cargo space for mat {mat_id}; skipping"
+                            )
+                            continue
+                    self._require(
+                        self._node.arm_pick_material(
+                            station_id=station_id, material_id=mat_id
+                        ),
+                        f"arm_pick_material(station={station_id}, material={mat_id}) (recovery)",
+                    )
+                    self._ledger.remove(station_id, mat_id)
+                    self._start_ready_intransit_assembly()
+                self._soft(self._node.call_post_process(), "call_post_process (recovery)")
+            self._deliver_until_idle()
+
+        remaining = self._undelivered_intransit_products()
+        if remaining:
+            raise ExecutionFailure(
+                f"produce order(s) {remaining} could not be completed — "
+                f"missing materials {dict(self._remaining_material_need())} "
+                "have no known source in the arena"
+            )
 
     # ------------------------------------------------------------------
     # Deferred recycle — produce-then-recycle products with no initial

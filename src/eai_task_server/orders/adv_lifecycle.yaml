@@ -24,8 +24,8 @@ recycle_ids: [241, 462, 48132]
 # recycle_id listed there is an "immediate" recycle; recycle_ids missing from
 # it become deferred (produce -> deliver -> reclaim -> disassemble).
 stations:
-  - {station_id: 1, station_type: storage, material_ids: [10, 70]}
-  - {station_id: 2, station_type: storage, material_ids: [20, 40, 60]}
-  - {station_id: 3, station_type: storage, material_ids: [30, 50, 80]}
+  - {station_id: 1, station_type: storage, material_ids: [1, 7]}
+  - {station_id: 2, station_type: storage, material_ids: [2, 4, 6]}
+  - {station_id: 3, station_type: storage, material_ids: [3, 5, 8]}
   - {station_id: 4, station_type: workbench}
   - {station_id: 6, station_type: customer, material_ids: [48132, 462, 241]}

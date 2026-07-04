@@ -10,6 +10,7 @@
 
   <depend>rclpy</depend>
   <depend>sml_messages</depend>
+  <depend>python3-yaml</depend>
 
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

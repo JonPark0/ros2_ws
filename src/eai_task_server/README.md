@@ -86,3 +86,44 @@ Combined one-shot example:
 ```bash
 ros2 launch eai_task_server task_server_with_listener.launch.py scenario:=production stage:=beginner publish_once:=true
 ```
+
+## Manual Order Server
+
+`manual_order_server` builds one task by hand (side, produce/recycle product IDs,
+storage material_ids) and publishes it once to `/eai/task` and the per-side topics.
+
+```bash
+ros2 run eai_task_server manual_order_server
+```
+
+Without `order_file`, it runs an interactive CLI that asks for the side, how many
+produce/recycle orders to place, the product IDs, which recycled products already
+sit on the customer counter, and the initial material_ids per storage station.
+
+### Loading an order from a YAML file
+
+Pass a relative path (resolved against the current working directory) via the
+`order_file` ROS parameter to skip the interactive prompts and publish
+non-interactively:
+
+```bash
+ros2 run eai_task_server manual_order_server --ros-args -p order_file:=src/eai_task_server/orders/example_order.yaml
+```
+
+See [`orders/example_order.yaml`](./orders/example_order.yaml) for the file format:
+
+```yaml
+side: a
+produce_ids: [13, 462, 711]
+recycle_ids: [81, 442, 711]
+customer_initial_ids: [81, 711]   # optional; omit to treat all recycle_ids as immediate
+material_by_station:
+  1: [1, 3, 7]
+  2: [4, 6, 2]
+  7: [8, 1]
+```
+
+- `side`: `a` or `b`
+- `produce_ids` / `recycle_ids`: product IDs from the catalog in [`eai_task_server/order.py`](./eai_task_server/order.py)
+- `customer_initial_ids`: subset of `recycle_ids` already on the customer table at plan time (drives the immediate vs. deferred recycle split); omit to default to all of `recycle_ids`
+- `material_by_station`: initial `material_ids` keyed by storage station_id for the selected side (side a: `1`, `2`, `7`; side b: `12`, `13`, `7`)

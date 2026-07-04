@@ -8,9 +8,12 @@ side를 고른 뒤 produce/recycle 개수와 제품 ID, station별 material_ids�
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 import sys
 import threading
 from typing import Dict, List, Sequence
+
+import yaml
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -53,10 +56,12 @@ class ManualOrderServer(Node):
         self.declare_parameter("task_topic", "/eai/task")
         self.declare_parameter("side_a_topic", "/eai/task/side_a")
         self.declare_parameter("side_b_topic", "/eai/task/side_b")
+        self.declare_parameter("order_file", "")
 
         self.task_topic = self.get_parameter("task_topic").get_parameter_value().string_value
         self.side_a_topic = self.get_parameter("side_a_topic").get_parameter_value().string_value
         self.side_b_topic = self.get_parameter("side_b_topic").get_parameter_value().string_value
+        self.order_file = self.get_parameter("order_file").get_parameter_value().string_value
 
         self.publisher = self.create_publisher(Task, self.task_topic, TASK_QOS)
         self.side_a_publisher = self.create_publisher(Task, self.side_a_topic, TASK_QOS)
@@ -421,7 +426,105 @@ def run_manual_cli(node: ManualOrderServer) -> None:
     node.publish_task(task)
 
 
+def load_order_config(order_file: str) -> Dict:
+    path = Path(order_file)
+    if not path.is_file():
+        raise ValueError(f"order_file을 찾을 수 없습니다: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"order_file 최상위 구조는 mapping이어야 합니다: {path}")
+    return config
+
+
+def build_task_from_config(config: Dict) -> tuple[Task, str, List[int], List[int], Dict[int, List[int]], int, int, List[int]]:
+    side = str(config.get("side", "")).strip().lower()
+    if side not in SIDES:
+        raise ValueError(f"side는 {SIDES} 중 하나여야 합니다: {side!r}")
+
+    produce_ids = [int(pid) for pid in config.get("produce_ids", [])]
+    recycle_ids = [int(pid) for pid in config.get("recycle_ids", [])]
+    unknown = [pid for pid in produce_ids + recycle_ids if pid not in PRODUCTS]
+    if unknown:
+        raise ValueError(f"알 수 없는 product_id: {unknown}")
+
+    customer_initial_ids = config.get("customer_initial_ids")
+    if customer_initial_ids is None:
+        customer_initial_ids = list(recycle_ids)
+    else:
+        customer_initial_ids = [int(pid) for pid in customer_initial_ids]
+    invalid_customer_ids = [pid for pid in customer_initial_ids if pid not in recycle_ids]
+    if invalid_customer_ids:
+        raise ValueError(f"recycle 대상이 아닌 customer_initial_ids: {invalid_customer_ids}")
+
+    layout = SIDE_LAYOUT[side]
+    material_by_station: Dict[int, List[int]] = {}
+    for raw_station_id, material_ids in (config.get("material_by_station") or {}).items():
+        station_id = int(raw_station_id)
+        if station_id not in layout["storage_ids"]:
+            raise ValueError(
+                f"material_by_station의 station_id={station_id}는 side {side!r}의 "
+                f"storage station이 아닙니다 (허용: {layout['storage_ids']})"
+            )
+        parsed_material_ids = [int(mid) for mid in material_ids]
+        invalid = [mid for mid in parsed_material_ids if mid not in VALID_MATERIAL_IDS]
+        if invalid:
+            raise ValueError(f"허용되지 않는 material_id: {invalid}")
+        material_by_station[station_id] = parsed_material_ids
+
+    selected_workbench_id = layout["workbench_ids"][0]
+    selected_customer_id = layout["customer_ids"][0]
+    task = build_task(
+        side,
+        produce_ids,
+        recycle_ids,
+        material_by_station,
+        selected_workbench_id,
+        selected_customer_id,
+        customer_initial_ids,
+    )
+    return (
+        task,
+        side,
+        produce_ids,
+        recycle_ids,
+        material_by_station,
+        selected_workbench_id,
+        selected_customer_id,
+        customer_initial_ids,
+    )
+
+
+def run_yaml_cli(node: ManualOrderServer, order_file: str) -> None:
+    print(color(f"=== EAI-WS Manual Order Server (order_file={order_file}) ===", CYAN + BOLD))
+    config = load_order_config(order_file)
+    (
+        task,
+        side,
+        produce_ids,
+        recycle_ids,
+        material_by_station,
+        selected_workbench_id,
+        selected_customer_id,
+        customer_initial_ids,
+    ) = build_task_from_config(config)
+    print_summary(
+        side,
+        produce_ids,
+        recycle_ids,
+        material_by_station,
+        task,
+        selected_workbench_id,
+        selected_customer_id,
+        customer_initial_ids,
+    )
+    node.publish_task(task)
+
+
 def run_cli(node: ManualOrderServer) -> None:
+    if node.order_file:
+        run_yaml_cli(node, node.order_file)
+        return
     run_manual_cli(node)
 
 

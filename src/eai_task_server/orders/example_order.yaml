@@ -1,0 +1,31 @@
+# Example order file for eai_task_server's manual_order_server.
+#
+# Usage:
+#   ros2 run eai_task_server manual_order_server --ros-args -p order_file:=src/eai_task_server/orders/example_order.yaml
+#
+# order_file is resolved relative to the current working directory the
+# command is run from (not relative to this package).
+
+# side: "a" or "b"
+side: a
+
+# product_id list to PRODUCE (see PRODUCTS in eai_task_server/order.py for the catalog)
+produce_ids: [13, 462, 711]
+
+# product_id list to RECYCLE
+recycle_ids: [81, 442, 711]
+
+# Which recycle_ids are already sitting on the customer counter at plan time.
+# Anything in recycle_ids but NOT listed here is treated as a "deferred"
+# recycle (produce -> deliver -> reclaim -> disassemble).
+# Omit this key entirely to default to "all recycle_ids are immediate".
+customer_initial_ids: [81, 711]
+
+# Initial material_ids per storage station, keyed by station_id.
+# Only storage/shared-storage stations for the selected side accept
+# material_ids (side a: 1, 2, 7 / side b: 12, 13, 7).
+# Individual materials are 1-8, known batches are 10/20/.../80, mix batch is 90.
+material_by_station:
+  1: [1, 3, 7]
+  2: [4, 6, 2]
+  7: [8, 1]

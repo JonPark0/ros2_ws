@@ -1,0 +1,672 @@
+{
+  "schema_version": "1.2-gui-shared7-narrow",
+  "name": "SML World Cup 2026 Layout - Shared Zone Narrow Around Station 7",
+  "source_image": {
+    "pixel_size": {
+      "width": 510,
+      "height": 283
+    },
+    "note": "Coordinates are estimated from the provided layout image. Origin is top-left. Unit is image pixel."
+  },
+  "coordinate_system": {
+    "origin": "top_left",
+    "x_axis": "right",
+    "y_axis": "down",
+    "unit": "px",
+    "map_size_px": {
+      "width": 510,
+      "height": 283
+    }
+  },
+  "station_type_legend": {
+    "customer_counter": {
+      "color": "orange",
+      "ros_type_hint": "ST_CUSTOMER"
+    },
+    "workbench": {
+      "color": "purple",
+      "ros_type_hint": "ST_WORKBENCH"
+    },
+    "hybrid_work_shelf": {
+      "color": "purple_dotted",
+      "ros_type_hint": "ST_HYBRID"
+    },
+    "storage_shelf": {
+      "color": "green",
+      "ros_type_hint": "ST_STORAGE"
+    },
+    "shared_storage": {
+      "color": "green",
+      "ros_type_hint": "ST_STORAGE"
+    },
+    "start_area": {
+      "color": "red_dashed",
+      "ros_type_hint": "START_GOAL"
+    },
+    "wall_100cm": {
+      "color": "cyan",
+      "style": "solid"
+    },
+    "wall_50cm": {
+      "color": "light_purple",
+      "style": "solid"
+    }
+  },
+  "zones": [
+    {
+      "id": "side_a",
+      "name": "Side A",
+      "bounds": {
+        "x": 128,
+        "y": 58,
+        "width": 131.5,
+        "height": 198
+      },
+      "draw_role": "background_region"
+    },
+    {
+      "id": "center",
+      "name": "Shared 7",
+      "bounds": {
+        "x": 259.5,
+        "y": 58,
+        "width": 35,
+        "height": 198
+      },
+      "draw_role": "shared_storage_column",
+      "station_id": 7,
+      "note": "Shared region is narrowed to the vertical interval around station 7 only."
+    },
+    {
+      "id": "side_b",
+      "name": "Side B",
+      "bounds": {
+        "x": 294.5,
+        "y": 58,
+        "width": 133.5,
+        "height": 198
+      },
+      "draw_role": "background_region"
+    }
+  ],
+  "stations": [
+    {
+      "station_id": 1,
+      "name": "side_a_storage_1",
+      "side": "side_a",
+      "type": "storage_shelf",
+      "center": {
+        "x": 193,
+        "y": 248
+      },
+      "size": {
+        "width": 28,
+        "height": 15
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 190,
+        "y": 232
+      }
+    },
+    {
+      "station_id": 2,
+      "name": "side_a_storage_2",
+      "side": "side_a",
+      "type": "storage_shelf",
+      "center": {
+        "x": 151,
+        "y": 205
+      },
+      "size": {
+        "width": 15,
+        "height": 27
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 167,
+        "y": 205
+      }
+    },
+    {
+      "station_id": 3,
+      "name": "side_a_hybrid_1",
+      "side": "side_a",
+      "type": "hybrid_work_shelf",
+      "center": {
+        "x": 212,
+        "y": 151
+      },
+      "size": {
+        "width": 33,
+        "height": 13
+      },
+      "rotation_deg": 45,
+      "label_position": {
+        "x": 225,
+        "y": 145
+      }
+    },
+    {
+      "station_id": 4,
+      "name": "side_a_workbench_1",
+      "side": "side_a",
+      "type": "workbench",
+      "center": {
+        "x": 151,
+        "y": 127
+      },
+      "size": {
+        "width": 15,
+        "height": 28
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 168,
+        "y": 128
+      }
+    },
+    {
+      "station_id": 5,
+      "name": "side_a_workbench_2",
+      "side": "side_a",
+      "type": "workbench",
+      "center": {
+        "x": 202,
+        "y": 88
+      },
+      "size": {
+        "width": 27,
+        "height": 16
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 201,
+        "y": 104
+      }
+    },
+    {
+      "station_id": 6,
+      "name": "side_a_customer_1",
+      "side": "side_a",
+      "type": "customer_counter",
+      "center": {
+        "x": 249,
+        "y": 82
+      },
+      "size": {
+        "width": 28,
+        "height": 16
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 249,
+        "y": 99
+      }
+    },
+    {
+      "station_id": 7,
+      "name": "shared_storage_1",
+      "side": "shared",
+      "type": "shared_storage",
+      "center": {
+        "x": 277,
+        "y": 158
+      },
+      "size": {
+        "width": 15,
+        "height": 42
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 277,
+        "y": 160
+      }
+    },
+    {
+      "station_id": 8,
+      "name": "side_b_customer_1",
+      "side": "side_b",
+      "type": "customer_counter",
+      "center": {
+        "x": 306,
+        "y": 82
+      },
+      "size": {
+        "width": 28,
+        "height": 16
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 306,
+        "y": 99
+      }
+    },
+    {
+      "station_id": 9,
+      "name": "side_b_workbench_1",
+      "side": "side_b",
+      "type": "workbench",
+      "center": {
+        "x": 356,
+        "y": 88
+      },
+      "size": {
+        "width": 27,
+        "height": 16
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 356,
+        "y": 104
+      }
+    },
+    {
+      "station_id": 10,
+      "name": "side_b_workbench_2",
+      "side": "side_b",
+      "type": "workbench",
+      "center": {
+        "x": 406,
+        "y": 127
+      },
+      "size": {
+        "width": 15,
+        "height": 28
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 383,
+        "y": 128
+      }
+    },
+    {
+      "station_id": 11,
+      "name": "side_b_hybrid_1",
+      "side": "side_b",
+      "type": "hybrid_work_shelf",
+      "center": {
+        "x": 344,
+        "y": 151
+      },
+      "size": {
+        "width": 33,
+        "height": 13
+      },
+      "rotation_deg": -45,
+      "label_position": {
+        "x": 326,
+        "y": 145
+      }
+    },
+    {
+      "station_id": 12,
+      "name": "side_b_storage_1",
+      "side": "side_b",
+      "type": "storage_shelf",
+      "center": {
+        "x": 401,
+        "y": 205
+      },
+      "size": {
+        "width": 15,
+        "height": 27
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 382,
+        "y": 205
+      }
+    },
+    {
+      "station_id": 13,
+      "name": "side_b_storage_2",
+      "side": "side_b",
+      "type": "storage_shelf",
+      "center": {
+        "x": 365,
+        "y": 248
+      },
+      "size": {
+        "width": 28,
+        "height": 15
+      },
+      "rotation_deg": 0,
+      "label_position": {
+        "x": 364,
+        "y": 232
+      }
+    }
+  ],
+  "start_areas": [
+    {
+      "id": "start_goal_a",
+      "name": "START / GOAL A",
+      "side": "side_a",
+      "center": {
+        "x": 249,
+        "y": 246
+      },
+      "size": {
+        "width": 45,
+        "height": 35
+      },
+      "rotation_deg": 0
+    },
+    {
+      "id": "start_goal_b",
+      "name": "START / GOAL B",
+      "side": "side_b",
+      "center": {
+        "x": 306,
+        "y": 246
+      },
+      "size": {
+        "width": 45,
+        "height": 35
+      },
+      "rotation_deg": 0
+    },
+    {
+      "id": "waiting_area",
+      "name": "Robot waiting area",
+      "side": "shared",
+      "center": {
+        "x": 95,
+        "y": 239
+      },
+      "size": {
+        "width": 31,
+        "height": 25
+      },
+      "rotation_deg": 0
+    }
+  ],
+  "walls": [
+    {
+      "id": "wall_a_top_horizontal",
+      "type": "wall_100cm",
+      "start": {
+        "x": 148,
+        "y": 82
+      },
+      "end": {
+        "x": 178,
+        "y": 82
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_a_top_vertical",
+      "type": "wall_100cm",
+      "start": {
+        "x": 146,
+        "y": 87
+      },
+      "end": {
+        "x": 146,
+        "y": 113
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_a_mid_vertical",
+      "type": "wall_100cm",
+      "start": {
+        "x": 146,
+        "y": 157
+      },
+      "end": {
+        "x": 146,
+        "y": 186
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_a_mid_horizontal",
+      "type": "wall_100cm",
+      "start": {
+        "x": 149,
+        "y": 178
+      },
+      "end": {
+        "x": 176,
+        "y": 178
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_a_bottom_diagonal",
+      "type": "wall_100cm",
+      "start": {
+        "x": 151,
+        "y": 229
+      },
+      "end": {
+        "x": 171,
+        "y": 249
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_center_left_vertical",
+      "type": "wall_100cm",
+      "start": {
+        "x": 225,
+        "y": 86
+      },
+      "end": {
+        "x": 225,
+        "y": 115
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_center_07_upper",
+      "type": "wall_50cm",
+      "start": {
+        "x": 277,
+        "y": 101
+      },
+      "end": {
+        "x": 277,
+        "y": 139
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_center_07_lower",
+      "type": "wall_50cm",
+      "start": {
+        "x": 277,
+        "y": 182
+      },
+      "end": {
+        "x": 277,
+        "y": 214
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_center_left_start",
+      "type": "wall_50cm",
+      "start": {
+        "x": 214,
+        "y": 226
+      },
+      "end": {
+        "x": 238,
+        "y": 226
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_center_right_start",
+      "type": "wall_50cm",
+      "start": {
+        "x": 316,
+        "y": 226
+      },
+      "end": {
+        "x": 340,
+        "y": 226
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_b_top_horizontal",
+      "type": "wall_100cm",
+      "start": {
+        "x": 376,
+        "y": 82
+      },
+      "end": {
+        "x": 402,
+        "y": 82
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_b_top_vertical",
+      "type": "wall_100cm",
+      "start": {
+        "x": 406,
+        "y": 87
+      },
+      "end": {
+        "x": 406,
+        "y": 113
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_b_mid_vertical",
+      "type": "wall_100cm",
+      "start": {
+        "x": 406,
+        "y": 158
+      },
+      "end": {
+        "x": 406,
+        "y": 187
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_b_mid_horizontal",
+      "type": "wall_100cm",
+      "start": {
+        "x": 378,
+        "y": 178
+      },
+      "end": {
+        "x": 405,
+        "y": 178
+      },
+      "thickness": 4
+    },
+    {
+      "id": "wall_b_bottom_diagonal",
+      "type": "wall_100cm",
+      "start": {
+        "x": 407,
+        "y": 232
+      },
+      "end": {
+        "x": 386,
+        "y": 252
+      },
+      "thickness": 4
+    }
+  ],
+  "gui_recommendations": {
+    "draw_order": [
+      "zones",
+      "walls",
+      "start_areas",
+      "stations",
+      "station_labels"
+    ],
+    "station_click_key": "station_id",
+    "logical_station_mapping": {
+      "1": "side_a_storage_1",
+      "2": "side_a_storage_2",
+      "3": "side_a_hybrid_1",
+      "4": "side_a_workbench_1",
+      "5": "side_a_workbench_2",
+      "6": "side_a_customer_1",
+      "7": "shared_storage_1",
+      "8": "side_b_customer_1",
+      "9": "side_b_workbench_1",
+      "10": "side_b_workbench_2",
+      "11": "side_b_hybrid_1",
+      "12": "side_b_storage_1",
+      "13": "side_b_storage_2"
+    },
+    "zone_policy": "The zones array contains only broad non-overlapping background regions. Do not put external labels or small semantic labels in zones if the Tk GUI draws zones as filled rectangles.",
+    "annotation_policy": "Use annotations for text-only labels such as Customers, Robot Fleets, Wait A/B, Warehouse, and external Workbench labels.",
+    "shared_zone_policy": "The shared center zone is intentionally limited to the narrow vertical interval around station 7. This prevents the center background from covering too much of the A/B arena and makes the GUI look more natural."
+  },
+  "annotations": [
+    {
+      "id": "customers_label",
+      "name": "Customers",
+      "type": "label",
+      "position": {
+        "x": 278,
+        "y": 58
+      },
+      "anchor": "center"
+    },
+    {
+      "id": "robot_fleets_label",
+      "name": "Robot Fleets",
+      "type": "label",
+      "position": {
+        "x": 278,
+        "y": 265
+      },
+      "anchor": "center"
+    },
+    {
+      "id": "wait_a_label",
+      "name": "Wait A",
+      "type": "label",
+      "position": {
+        "x": 153,
+        "y": 268
+      },
+      "anchor": "center"
+    },
+    {
+      "id": "wait_b_label",
+      "name": "Wait B",
+      "type": "label",
+      "position": {
+        "x": 368,
+        "y": 268
+      },
+      "anchor": "center"
+    },
+    {
+      "id": "right_workbench_label",
+      "name": "Workbench",
+      "type": "external_label",
+      "position": {
+        "x": 482,
+        "y": 120
+      },
+      "anchor": "center"
+    },
+    {
+      "id": "warehouse_label",
+      "name": "Warehouse",
+      "type": "external_label",
+      "position": {
+        "x": 482,
+        "y": 210
+      },
+      "anchor": "center"
+    }
+  ]
+}

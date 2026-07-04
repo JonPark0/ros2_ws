@@ -31,7 +31,7 @@ rotation_profiles:
     angle_deg: 149.936
   station_4_goal:
     direction: clockwise
-    angle_deg: 133.686
+    angle_deg: 172.726
   station_5_goal:
     direction: clockwise
     angle_deg: 156.096

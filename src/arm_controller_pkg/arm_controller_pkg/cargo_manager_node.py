@@ -32,6 +32,11 @@ PRODUCT_SLOT = 1
 MATERIAL_SLOTS = [2, 3, 4, 5, 6]
 ASSEMBLY_SLOTS = [7, 8]  # 조립 슬롯 (FIND_EMPTY 검색 대상 아님)
 
+# 완성품 전용 고정 배달 자리 개수 (인덱스 0~5). 워크벤치가 아닌 스테이션에
+# 비전 없이 완성품을 내려놓을 때, station_id별로 이 중 몇 번 자리까지
+# 찼는지를 여기서 기억한다 (amr_robot_node의 PRODUCT_DELIVERY_JOINTS와 짝).
+PRODUCT_DELIVERY_SLOTS = 6
+
 
 class CargoManagerNode(Node):
     def __init__(self):
@@ -43,6 +48,12 @@ class CargoManagerNode(Node):
             slot: []
             for slot in [PRODUCT_SLOT] + MATERIAL_SLOTS + ASSEMBLY_SLOTS
         }
+
+        # station_id별 완성품 고정 배달 자리(0~5) 점유 상태. 처음 보는 station_id는
+        # 6자리 모두 빈 상태(0)로 lazy 초기화된다. slot_state와 달리 이 상태는
+        # CLEAR_PRODUCT_DELIVERY로 명시적으로 비우기 전까지 리셋되지 않는다 — 로봇이
+        # 다른 작업을 하다가 나중에 같은 station으로 다시 와도 기억을 유지해야 하기 때문.
+        self.product_delivery_state = {}
 
         self.get_logger().info('[CARGO] cargo_manager_node started')
         self.get_logger().info(f'[CARGO] slots: {list(self.slot_state.keys())}')
@@ -60,6 +71,10 @@ class CargoManagerNode(Node):
                 return h + PICK_OFFSET.get(obj, 0)
             h += BLOCK_HEIGHT.get(obj, 2)
         return None
+
+    def _product_delivery_slots(self, station_id):
+        return self.product_delivery_state.setdefault(
+            station_id, [0] * PRODUCT_DELIVERY_SLOTS)
 
     # ── 서비스 콜백 ────────────────────────────────────────────────
 
@@ -181,6 +196,34 @@ class CargoManagerNode(Node):
                 )
                 self.get_logger().info(f'[CARGO] {response.message}')
 
+        elif action == 'SET_AT':
+            # 수동 보정용: 슬롯 스택의 특정 위치(층, station_id로 전달)를 직접 덮어쓴다.
+            # layer가 현재 스택 길이보다 크면 0(placeholder)으로 채운 뒤 지정한다.
+            slot = request.slot
+            layer = request.station_id
+            obj = request.object_id
+            if slot not in self.slot_state:
+                response.success = False
+                response.message = f'invalid slot={slot}'
+            elif layer < 0:
+                response.success = False
+                response.message = f'invalid layer={layer}'
+            else:
+                stack = self.slot_state[slot]
+                while len(stack) <= layer:
+                    stack.append(0)
+                stack[layer] = obj
+                response.success = True
+                response.slot = slot
+                response.layer_index = layer
+                response.stack = list(stack)
+                name = MATERIAL_NAMES.get(obj, f'product_id={obj}')
+                response.message = (
+                    f'slot={slot} layer={layer} set: object_id={obj} ({name}), '
+                    f'stack={stack}'
+                )
+                self.get_logger().info(f'[CARGO] {response.message}')
+
         elif action == 'CLEAR':
             slot = request.slot
             obj = request.object_id
@@ -200,6 +243,63 @@ class CargoManagerNode(Node):
                 )
                 self.get_logger().info(f'[CARGO] {response.message}')
 
+        elif action == 'FIND_EMPTY_PRODUCT_DELIVERY':
+            # 워크벤치가 아닌 스테이션에 완성품을 비전 없이 내려놓을 때 쓸 다음
+            # 빈 자리(0~5)를 station_id별로 찾아준다. 다 찼으면 실패를 반환해서
+            # 호출자(amr_robot_node)가 기존 비전(666) 방식으로 폴백하게 한다.
+            station_id = request.station_id
+            slots = self._product_delivery_slots(station_id)
+            for idx, obj in enumerate(slots):
+                if obj == 0:
+                    response.success = True
+                    response.slot = idx
+                    response.message = (
+                        f'empty product delivery slot found: station={station_id}, idx={idx}'
+                    )
+                    self.get_logger().info(f'[CARGO] {response.message}')
+                    return response
+
+            response.success = False
+            response.slot = -1
+            response.message = f'no empty product delivery slot at station={station_id}'
+            self.get_logger().warn(f'[CARGO] {response.message}')
+
+        elif action == 'SET_PRODUCT_DELIVERY':
+            # 완성품을 station_id의 idx(request.slot, 0~5) 자리에 내려놓았음을 기록한다.
+            station_id = request.station_id
+            idx = request.slot
+            obj = request.object_id
+            slots = self._product_delivery_slots(station_id)
+            if not (0 <= idx < PRODUCT_DELIVERY_SLOTS):
+                response.success = False
+                response.message = f'invalid product delivery idx={idx}'
+            else:
+                slots[idx] = obj
+                name = MATERIAL_NAMES.get(obj, f'product_id={obj}')
+                response.success = True
+                response.slot = idx
+                response.message = (
+                    f'station={station_id} idx={idx} set: object_id={obj} ({name}), '
+                    f'slots={slots}'
+                )
+                self.get_logger().info(f'[CARGO] {response.message}')
+
+        elif action == 'CLEAR_PRODUCT_DELIVERY':
+            # 수동 보정용: 사람이 완성품을 수거해간 뒤 station_id의 idx(request.slot,
+            # 0~5) 자리를 다시 비운다. 자동으로는 호출되지 않는다.
+            station_id = request.station_id
+            idx = request.slot
+            slots = self._product_delivery_slots(station_id)
+            if not (0 <= idx < PRODUCT_DELIVERY_SLOTS):
+                response.success = False
+                response.message = f'invalid product delivery idx={idx}'
+            else:
+                slots[idx] = 0
+                response.success = True
+                response.slot = idx
+                response.message = f'station={station_id} idx={idx} cleared, slots={slots}'
+                self.get_logger().info(f'[CARGO] {response.message}')
+
         elif action == 'STATUS':
             lines = []
             for slot, stack in self.slot_state.items():
@@ -212,6 +312,12 @@ class CargoManagerNode(Node):
                         layer = self._layer_index(slot, obj)
                         items.append(f'{name}(layer={layer})')
                     lines.append(f'slot={slot}: [{", ".join(items)}]')
+            for station_id, slots in self.product_delivery_state.items():
+                items = [
+                    (MATERIAL_NAMES.get(obj, f'product_id={obj}') if obj else 'empty')
+                    for obj in slots
+                ]
+                lines.append(f'product_delivery[station={station_id}]: {items}')
             response.success = True
             response.message = ' | '.join(lines)
             self.get_logger().info(f'[CARGO] STATUS: {response.message}')

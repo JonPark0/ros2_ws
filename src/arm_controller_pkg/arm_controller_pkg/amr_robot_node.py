@@ -20,7 +20,7 @@ VISION_LOAD_JOINT_DEG = np.array([-90.0, 13.70, 69.94, 0.0, 96.36, 0.0])
 
 # 아이스크림/빅트리 조립 중 재료 픽업<->조립위치<->cap_slot 등 직행 이동마다 거쳐가는
 # 경유 조인트. 안전한 중간 자세 하나만 거쳐서 충돌 위험을 줄인다.
-ASSEMBLY_TRANSIT_JOINT_DEG = np.array([-238.13, 9.23, 31.32, 5.79, 116.41, -9.49])
+ASSEMBLY_TRANSIT_JOINT_DEG = np.array([-267.08, 7.17, 33.75, -1.29, 115.63, 2.12])
 # np.array([-90.0, 13.82, 83.37, 0.0, 82.82, 0.0]), z=280.28
 # np.array([-90.0, 13.43, 80.49, 0.0, 86.09, 0.0]), z=301.28
 # np.array([-90.0, 13.28,  75.45, 0.0, 91.27, 0.0]), z=331.28 main 학교
@@ -126,6 +126,23 @@ DELIVERY_EMPTY_SPACE_VISION_ID = "666"
 # 필요한 여유값 — 전체 z값에서 이만큼 뺀다.
 DELIVERY_VISION_Z_OFFSET_MM = 20.0
 
+# 완성품 전용 고정 배달 포인트 (워크벤치 이외의 모든 스테이션 공용).
+# 물리적으로 완성품을 내려놓는 자리는 station_id와 무관하게 하나의 구역이라
+# 조인트 좌표 자체는 공용으로 쓰되, 이 중 몇 번 자리(0~5)까지 찼는지는
+# station_id별로 cargo_manager가 따로 기억한다 — 로봇이 다른 작업을 하다가
+# 나중에 같은 station으로 다시 배달을 와도 이미 채운 자리를 잊지 않기 위함.
+# 6자리가 모두 차면(cargo FIND_EMPTY_PRODUCT_DELIVERY 실패) 기존 비전(666) 방식으로
+# 폴백한다.
+PRODUCT_DELIVERY_JOINTS = [
+    np.array([-58.34, 37.14, 109.30, 40.18, -57.48, -18.87]),
+    np.array([-77.41, 39.47, 114.82, 20.4, -63.53, -5.88]),
+    np.array([-111.02, 30.05, 121.98, -25.33, -59.45, 11.14]),
+    np.array([-118.12, 22.30, 136.58, -31.46, -66.85, 10.41]),
+    np.array([-78.48, 19.43, 141.97, 11.77, -66.93, -4.21]),
+    np.array([-51.21, 30.37, 125.14, 21.67, -41.89, -2.9]),
+]
+
+
 # 조립 슬롯. target_slot은 더 이상 요청자(station_id 등)가 지정하지 않고,
 # cargo_manager가 배정해준 슬롯을 그대로 쓴다. 우선순위 확인용으로만 순서를 들고 있는다
 # (실제 "어느 슬롯을 줄지"는 cargo_manager 쪽 FIND_EMPTY_ASSEMBLY_SLOT이 결정한다).
@@ -217,7 +234,7 @@ PICK_OFFSET = {
     442:   {},               # carrot
     241:   {},               # traffic_light
     462:   {'z': 20.0},               # small_tree
-    711:   {'x': -25.0, 'z': 20.0},     # hammer 로봇베이스 기준 안쪽은 x+ 
+    711:   {'x': -11.0, 'z': 20.0},     # hammer 로봇베이스 기준 안쪽은 x+ 
     4482:  {'x': -20.0, 'z': 25.0},               # big_carrot
     8518:  {'y': -3.0, 'z': 30.0},   # burger
     48132: {'z': 25.0},               # ice_cream
@@ -255,13 +272,14 @@ DELIVERY_Z_MM = 165.0 #학교 115 #대회 165
 
 
 # --- 완성품(Products) 전용 delivery Z 상수 ---
-# 완성품은 6번 포인트에서 손목이 꺾여 Tool z축이 수직이 아니므로,
-# delivery 내려놓기는 Base 프레임(중력 방향) 기준으로 수행한다.
-# point 6에서 내려놓을 때 층 그룹과 무관하게 항상 이 값만큼 내려갔다 올라온다.
-# 비전으로 x,y 보정을 거치면 실제 도착 위치가 미세하게 달라질 수 있어서,
-# 워크벤치(비전 없이 point 6 직행)와 그 외 스테이션(비전 보정)의 z를 따로 둔다.
-PRODUCT_DELIVERY_FIXED_Z_MM = 240.0   # 워크벤치 (비전 없음)
-PRODUCT_DELIVERY_VISION_Z_MM = 225.0  # 그 외 스테이션 (비전 x,y 보정)
+# 완성품은 손목이 꺾인 자세에서 내려놓으므로 Tool z축이 수직이 아니다.
+# delivery 내려놓기는 항상 Base 프레임(중력 방향) 기준으로 수행한다.
+# 비전 없이 고정 조인트로 바로 가는 경우(워크벤치의 point 6, 그리고 그 외 스테이션의
+# PRODUCT_DELIVERY_JOINTS 0~5번 자리)는 PRODUCT_DELIVERY_FIXED_Z_MM을 쓰고,
+# 6자리가 모두 차서 비전(666)으로 폴백하는 경우만 PRODUCT_DELIVERY_VISION_Z_MM을 쓴다
+# (비전 x,y 보정을 거치면 실제 도착 위치가 미세하게 달라지므로 z를 따로 둔다).
+PRODUCT_DELIVERY_FIXED_Z_MM = 210.0   # 비전 없이 고정 조인트 직행
+PRODUCT_DELIVERY_VISION_Z_MM = 210.0  # 6자리 모두 찼을 때 비전 폴백
 
 
 # --- 모션 속도/가속 (이 4개 숫자가 로봇팔 속도를 전부 결정한다) ---
@@ -285,7 +303,7 @@ L_VEL, L_ACC = 700, 1500
 #   - sequence_assemble 에서 순서대로 move_j 로 이동
 ASSEMBLY_Z_DOWN_MM = 70.0   # layer 0 기준 블록 내려놓기 하강 거리 (mm)
 ASSEMBLY_Z_UP_MM   = -70.0  # layer 0 기준 블록 내려놓기 상승 거리 (mm)
-BLOCK_H_MM         = 18.0   # 블록 1개 높이 (mm)
+BLOCK_H_MM         = 17.0   # 블록 1개 높이 (mm)
 
 # --- OLD BigTree (46262) 전용 조립 상수: 재료슬롯 2-6 내부 조립 버전 비활성화 ---
 # BIG_TREE_STEP2_Z_OFFSET_MM = 19.0   # slot_x layer2: 다른 슬롯의 6을 결합 (70-19=51mm)
@@ -324,7 +342,7 @@ STAGING_MATERIAL_SLOTS = [2, 3, 4, 5, 6]
 
 # 아이스크림 캡(3+1+2) 조립: 캡 스테이징 슬롯의 layer_index=1 위치에서 2(초록)를 결합
 ICE_CREAM_CAP_LAYER_INDEX = 1
-ICE_CREAM_CAP_Z_OFFSET_MM = 19.0   # z_down = ASSEMBLY_Z_DOWN_MM(70) - 19 = 51mm
+ICE_CREAM_CAP_Z_OFFSET_MM = 16.0   # z_down = ASSEMBLY_Z_DOWN_MM(70) - 19 = 51mm
 
 # UNLOAD 픽업용 슬롯 조인트 (direct move_j, 중간 웨이포인트 없음)
 # 키: slot 번호 (슬롯 2~6)
@@ -416,8 +434,16 @@ ASSEMBLY_SEQUENCE = {
     81:   [8, 1],        # e_stop:        4x2노랑 → 2x2빨강
     442:  [4, 4, 2],     # carrot:        2x2노랑 → 2x2노랑 → 2x2초록
     241:  [2, 4, 1],     # traffic_light: 2x2초록 → 2x2노랑 → 2x2빨강
-    462:  [4, 6, 2],     # small_tree:    2x2노랑 → 4x2초록 → 2x2초록
-    711:  [1, 1, 7],     # hammer:        2x2빨강 → 2x2빨강 → 2x2파랑
+    462:  [
+        {'id': 4, 'layer': 0, 'x':  0.0},
+        {'id': 6, 'layer': 0.9, 'x':  0.0 },
+        {'id': 2, 'layer': 1.7, 'x':  0.0},
+        ],     # small_tree:    2x2노랑 → 4x2초록 → 2x2초록
+    711: [
+        {'id': 1, 'layer': 0, 'x':  0.0},
+        {'id': 1, 'layer': 1, 'x':  0.0 },
+        {'id': 7, 'layer': 1.7, 'x':  1.1, 'y':  0.5},
+    ],     # hammer:        2x2빨강 → 2x2빨강 → 2x2파랑
     4482: [4, 4, 8, 2],  # big_carrot:    2x2노랑 → 2x2노랑 → 4x2노랑 → 2x2초록
     # dict 형식: {'id': 재료id, 'layer': 높이레이어, 'x': Tool X 오프셋(mm)}
     # 같은 layer 값이 여러 번 나오면 같은 높이에서 x 위치만 달리해 배치한다.
@@ -1003,9 +1029,10 @@ class AmrRobotNode(Node):
 
         return self.go_moving_pose()
 
-    def _place_product_at_point6(self, z_mm, label_prefix):
-        """point 6에 도착한 이후 공통 동작: z 하강 -> open -> z 상승 -> moving pose 복귀
-        (Base 프레임). place_at_delivery_product_by_vision / _fixed가 각자의 z_mm으로 공유한다."""
+    def _release_product_base_frame(self, z_mm, label_prefix):
+        """완성품 고정 조인트(point 6 또는 PRODUCT_DELIVERY_JOINTS 자리)에 도착한 이후
+        공통 동작: z 하강 -> open -> z 상승 -> moving pose 복귀 (Base 프레임).
+        place_at_delivery_product_by_vision / _fixed / _fixed_slot이 각자의 z_mm으로 공유한다."""
         delivery_ref = rb.ReferenceFrame.Base
         delivery_down = [0.0, 0.0, -z_mm, 0.0, 0.0, 0.0]
         delivery_up = [0.0, 0.0, z_mm, 0.0, 0.0, 0.0]
@@ -1039,10 +1066,10 @@ class AmrRobotNode(Node):
         return self.go_moving_pose()
 
     def place_at_delivery_product_by_vision(self, label_prefix='delivery(product,vision)'):
-        """완성품 전용, 워크벤치가 아닌 스테이션. 슬롯(1 또는 7/8)과 무관하게 항상
-        point 6(PRODUCT_DELIVERY_IDX) 고정 조인트로 가되, 비전(666)으로 측정한 x,y만
-        미세 보정으로 얹는다. z는 층 그룹과 무관하게 항상 PRODUCT_DELIVERY_VISION_Z_MM만큼
-        내려갔다 올라온다."""
+        """완성품 전용, 워크벤치가 아닌 스테이션의 폴백 경로. PRODUCT_DELIVERY_JOINTS의
+        6자리가 모두 찬 경우에만 호출되며, point 6(PRODUCT_DELIVERY_IDX) 고정 조인트로
+        가되 비전(666)으로 측정한 x,y만 미세 보정으로 얹는다. z는 항상
+        PRODUCT_DELIVERY_VISION_Z_MM만큼 내려갔다 올라온다."""
         if not self.move_j_checked(
             VISION_LOAD_JOINT_DEG, label=f'{label_prefix} vision pose'
         ):
@@ -1071,7 +1098,7 @@ class AmrRobotNode(Node):
             self.go_home()
             return False
 
-        return self._place_product_at_point6(PRODUCT_DELIVERY_VISION_Z_MM, label_prefix)
+        return self._release_product_base_frame(PRODUCT_DELIVERY_VISION_Z_MM, label_prefix)
 
     def place_at_delivery_product_fixed(self, label_prefix='delivery(product,fixed)'):
         """완성품 전용, 워크벤치 스테이션. 비전을 전혀 쓰지 않고 point 6 고정 조인트로
@@ -1081,7 +1108,18 @@ class AmrRobotNode(Node):
             self.go_home()
             return False
 
-        return self._place_product_at_point6(PRODUCT_DELIVERY_FIXED_Z_MM, label_prefix)
+        return self._release_product_base_frame(PRODUCT_DELIVERY_FIXED_Z_MM, label_prefix)
+
+    def place_at_delivery_product_fixed_slot(self, idx, label_prefix='delivery(product,fixed-slot)'):
+        """완성품 전용, 워크벤치가 아닌 스테이션의 기본 경로. 비전 없이
+        PRODUCT_DELIVERY_JOINTS[idx](0~5) 고정 조인트로 바로 이동해 내려놓는다.
+        idx는 cargo_manager가 station_id별로 기억해준 다음 빈 자리다."""
+        joint = PRODUCT_DELIVERY_JOINTS[idx]
+        if not self.move_j_checked(joint, label=f'{label_prefix} idx={idx} pose'):
+            self.go_home()
+            return False
+
+        return self._release_product_base_frame(PRODUCT_DELIVERY_FIXED_Z_MM, label_prefix)
 
     # --- 서비스 콜백 (LOAD / UNLOAD 분기) ---
 
@@ -1533,12 +1571,18 @@ class AmrRobotNode(Node):
         self.get_logger().info(f'[CARGO] object found: slot={slot}, layer_index={layer_index}')
 
         # 1-1. 배달 위치 결정
-        #   완제품(is_product)은 원래 있던 슬롯(1이든 7/8이든)과 무관하게 항상
-        #   point 6(PRODUCT_DELIVERY_IDX) 고정 조인트로 가고, z는 층 그룹과 무관한
-        #   고정값을 쓴다. 다만 워크벤치(WORKBENCH_STATION_IDS)는 비전을 아예 쓰지 않고
-        #   point 6로 바로 가고(place_at_delivery_product_fixed, PRODUCT_DELIVERY_FIXED_Z_MM),
-        #   그 외 스테이션(고객센터 등)은 비전(666)으로 x,y만 미세 보정한다
-        #   (place_at_delivery_product_by_vision, PRODUCT_DELIVERY_VISION_Z_MM).
+        #   완제품(is_product)은 원래 있던 슬롯(1이든 7/8이든)과 무관하게 항상 고정 배달
+        #   위치로 가며, z는 층 그룹과 무관한 고정값을 쓴다.
+        #     - 워크벤치(WORKBENCH_STATION_IDS): 비전 없이 point 6로 바로 간다
+        #       (place_at_delivery_product_fixed, PRODUCT_DELIVERY_FIXED_Z_MM).
+        #     - 그 외 스테이션(고객센터 등): PRODUCT_DELIVERY_JOINTS의 0~5번 자리 중
+        #       cargo_manager가 station_id별로 기억해둔 다음 빈 자리로 바로 간다
+        #       (place_at_delivery_product_fixed_slot, PRODUCT_DELIVERY_FIXED_Z_MM).
+        #       이 점유 상태는 cargo_manager에 영속적으로 남아있어서, 로봇이 다른
+        #       작업을 하다가 나중에 같은 station으로 다시 와도 이미 채운 자리를
+        #       덮어쓰지 않는다. 6자리가 모두 찼으면(FIND_EMPTY_PRODUCT_DELIVERY 실패)
+        #       기존 비전(666) 방식으로 폴백한다
+        #       (place_at_delivery_product_by_vision, PRODUCT_DELIVERY_VISION_Z_MM).
         #   재료는 station이 워크벤치면 이번 UNLOAD 배치 안에서 몇 번째로 내려놓는지
         #   (sequence_unload_multi가 세어서 넘겨주는 workbench_delivery_idx)를 그대로
         #   delivery_idx로 써서 0번부터 순서대로 고정 웨이포인트에 내려놓는다.
@@ -1547,12 +1591,22 @@ class AmrRobotNode(Node):
         use_vision_delivery = False
         use_product_vision_delivery = False
         use_product_fixed_delivery = False
+        use_product_fixed_slot_delivery = False
         delivery_idx = None
+        product_delivery_slot_idx = None
         if is_product:
             if station_id in WORKBENCH_STATION_IDS:
                 use_product_fixed_delivery = True
             else:
-                use_product_vision_delivery = True
+                find_res = self.call_cargo('FIND_EMPTY_PRODUCT_DELIVERY', station_id=station_id)
+                if find_res and find_res.success:
+                    use_product_fixed_slot_delivery = True
+                    product_delivery_slot_idx = find_res.slot
+                else:
+                    self.get_logger().warn(
+                        f'[AMR] no empty product delivery slot at station={station_id}, '
+                        'falling back to vision delivery')
+                    use_product_vision_delivery = True
         elif station_id in WORKBENCH_STATION_IDS:
             delivery_idx = workbench_delivery_idx
             if not (0 <= delivery_idx <= 5):
@@ -1670,9 +1724,10 @@ class AmrRobotNode(Node):
             }
 
         # 9. 배달 위치로 이동해 내려놓는다.
-        #    완제품은 항상 point 6로 가되, 워크벤치는 비전 없이 바로, 그 외 스테이션은
-        #    비전 xy 보정을 거친다. 워크벤치 재료는 1-1에서 정한 delivery_idx로 고정
-        #    웨이포인트, 그 외 스테이션 재료는 비전(666)으로 바로 내려놓는다.
+        #    완제품은 항상 고정 조인트로 가되, 워크벤치는 point 6, 그 외 스테이션은
+        #    PRODUCT_DELIVERY_JOINTS의 배정받은 자리(다 찼으면 비전 xy 보정 폴백)로 간다.
+        #    워크벤치 재료는 1-1에서 정한 delivery_idx로 고정 웨이포인트, 그 외 스테이션
+        #    재료는 비전(666)으로 바로 내려놓는다.
         if use_product_fixed_delivery:
             if not self.place_at_delivery_product_fixed():
                 self.go_home()
@@ -1681,6 +1736,26 @@ class AmrRobotNode(Node):
                     'slot': slot,
                     'object_id': object_id,
                     'message': 'delivery placement (product,fixed) failed',
+                }
+        elif use_product_fixed_slot_delivery:
+            if not self.place_at_delivery_product_fixed_slot(product_delivery_slot_idx):
+                self.go_home()
+                return {
+                    'success': False,
+                    'slot': slot,
+                    'object_id': object_id,
+                    'message': 'delivery placement (product,fixed-slot) failed',
+                }
+            res = self.call_cargo(
+                'SET_PRODUCT_DELIVERY', slot=product_delivery_slot_idx,
+                object_id=object_id, station_id=station_id)
+            if not res or not res.success:
+                self.get_logger().error('[AMR] cargo SET_PRODUCT_DELIVERY failed')
+                return {
+                    'success': False,
+                    'slot': slot,
+                    'object_id': object_id,
+                    'message': 'delivered physically but cargo SET_PRODUCT_DELIVERY failed',
                 }
         elif use_product_vision_delivery:
             if not self.place_at_delivery_product_by_vision():
@@ -2536,16 +2611,16 @@ class AmrRobotNode(Node):
             return {'success': False, 'slot': -1, 'object_id': product_id,
                     'message': 'base: move to target_slot load pos failed'}
 
-        if not self.move_l_rel_checked([0.0, 0.0, LOAD_Z_DOWN_MM, 0.0, 0.0, 0.0], label='base place z down'):
+        if not self.move_l_rel_checked([0.0, 0.0, ASSEMBLY_Z_DOWN_MM, 0.0, 0.0, 0.0], label='base place z down'):
             self.go_home()
             return {'success': False, 'slot': -1, 'object_id': product_id, 'message': 'base: place z down failed'}
 
         if not self.call_gripper(False):
-            self.move_l_rel_checked([0.0, 0.0, -LOAD_Z_DOWN_MM, 0.0, 0.0, 0.0], label='base place retreat')
+            self.move_l_rel_checked([0.0, 0.0, -ASSEMBLY_Z_DOWN_MM, 0.0, 0.0, 0.0], label='base place retreat')
             self.go_home()
             return {'success': False, 'slot': -1, 'object_id': product_id, 'message': 'base: release failed'}
 
-        if not self.move_l_rel_checked([0.0, 0.0, -LOAD_Z_DOWN_MM, 0.0, 0.0, 0.0], label='base place z up'):
+        if not self.move_l_rel_checked([0.0, 0.0, -ASSEMBLY_Z_DOWN_MM, 0.0, 0.0, 0.0], label='base place z up'):
             self.go_home()
             return {'success': False, 'slot': -1, 'object_id': product_id, 'message': 'base: place z up failed'}
 

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>sml_worldcup_gui</name>
+  <version>0.1.0</version>
+  <description>World Cup 2026 arena and EAI task visualization GUI.</description>
+  <maintainer email="team@example.com">SML Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-tk</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sml_messages</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

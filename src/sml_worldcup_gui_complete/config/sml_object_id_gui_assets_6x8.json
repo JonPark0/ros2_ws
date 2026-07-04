@@ -1,0 +1,599 @@
+{
+  "schema_version": "1.1",
+  "description": "GUI-friendly Object ID asset definitions for SML objects. All products use a fixed 6x8 placement area.",
+  "coordinate_system": {
+    "origin": "bottom_left",
+    "x_axis": "right",
+    "y_axis": "up",
+    "unit": "block_unit",
+    "placement_area": {
+      "w": 6,
+      "h": 8
+    },
+    "recommended_px_per_unit": 28,
+    "note": "Every completed product is placed inside a fixed 6x8(w,h) area. Blocks are bottom-aligned and horizontally centered unless the shape requires asymmetry."
+  },
+  "raw_materials": {
+    "1": {
+      "name": "2x2_red",
+      "color": "red",
+      "hex": "#d00000",
+      "size": {
+        "w": 2,
+        "h": 2
+      }
+    },
+    "2": {
+      "name": "2x2_green",
+      "color": "green",
+      "hex": "#548235",
+      "size": {
+        "w": 2,
+        "h": 2
+      }
+    },
+    "3": {
+      "name": "2x2_blue",
+      "color": "blue",
+      "hex": "#0070c0",
+      "size": {
+        "w": 2,
+        "h": 2
+      }
+    },
+    "4": {
+      "name": "2x2_yellow",
+      "color": "yellow",
+      "hex": "#ffc000",
+      "size": {
+        "w": 2,
+        "h": 2
+      }
+    },
+    "5": {
+      "name": "4x2_red",
+      "color": "red",
+      "hex": "#d00000",
+      "size": {
+        "w": 4,
+        "h": 2
+      }
+    },
+    "6": {
+      "name": "4x2_green",
+      "color": "green",
+      "hex": "#548235",
+      "size": {
+        "w": 4,
+        "h": 2
+      }
+    },
+    "7": {
+      "name": "4x2_blue",
+      "color": "blue",
+      "hex": "#0070c0",
+      "size": {
+        "w": 4,
+        "h": 2
+      }
+    },
+    "8": {
+      "name": "4x2_yellow",
+      "color": "yellow",
+      "hex": "#ffc000",
+      "size": {
+        "w": 4,
+        "h": 2
+      }
+    }
+  },
+  "products": {
+    "34": {
+      "name": "Battery",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        3,
+        4
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 3,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "3"
+        },
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        }
+      ]
+    },
+    "13": {
+      "name": "Magnet",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        1,
+        3
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 1,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        },
+        {
+          "raw_id": 3,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "3"
+        }
+      ]
+    },
+    "81": {
+      "name": "E-Stop",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        8,
+        1
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 8,
+          "x": 1,
+          "y": 0,
+          "w": 4,
+          "h": 2,
+          "label": "8"
+        },
+        {
+          "raw_id": 1,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        }
+      ]
+    },
+    "442": {
+      "name": "Carrot",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        4,
+        4,
+        2
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 2,
+          "x": 2,
+          "y": 4,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        }
+      ]
+    },
+    "241": {
+      "name": "Traffic Light",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        2,
+        4,
+        1
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 2,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        },
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 1,
+          "x": 2,
+          "y": 4,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        }
+      ]
+    },
+    "462": {
+      "name": "Small Tree",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        4,
+        6,
+        2
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 6,
+          "x": 1,
+          "y": 2,
+          "w": 4,
+          "h": 2,
+          "label": "6"
+        },
+        {
+          "raw_id": 2,
+          "x": 2,
+          "y": 4,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        }
+      ]
+    },
+    "711": {
+      "name": "Hammer",
+      "tier": "beginner",
+      "build_sequence_bottom_to_top": [
+        7,
+        1,
+        1
+      ],
+      "display_note": "Blue 4x2 head is displayed at the top; red 2x2 blocks form the handle below.",
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 1,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        },
+        {
+          "raw_id": 1,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        },
+        {
+          "raw_id": 7,
+          "x": 1,
+          "y": 4,
+          "w": 4,
+          "h": 2,
+          "label": "7"
+        }
+      ]
+    },
+    "4482": {
+      "name": "Big Carrot",
+      "tier": "advanced",
+      "build_sequence_bottom_to_top": [
+        4,
+        4,
+        8,
+        2
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 8,
+          "x": 1,
+          "y": 4,
+          "w": 4,
+          "h": 2,
+          "label": "8"
+        },
+        {
+          "raw_id": 2,
+          "x": 2,
+          "y": 6,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        }
+      ]
+    },
+    "8518": {
+      "name": "Burger",
+      "tier": "advanced",
+      "build_sequence_bottom_to_top": [
+        8,
+        5,
+        1,
+        8
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 8,
+          "x": 1,
+          "y": 0,
+          "w": 4,
+          "h": 2,
+          "label": "8"
+        },
+        {
+          "raw_id": 5,
+          "x": 0,
+          "y": 2,
+          "w": 4,
+          "h": 2,
+          "label": "5"
+        },
+        {
+          "raw_id": 1,
+          "x": 4,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        },
+        {
+          "raw_id": 8,
+          "x": 1,
+          "y": 4,
+          "w": 4,
+          "h": 2,
+          "label": "8"
+        }
+      ]
+    },
+    "48132": {
+      "name": "Ice Cream",
+      "tier": "advanced",
+      "build_sequence_bottom_to_top": [
+        4,
+        8,
+        1,
+        3,
+        2
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 8,
+          "x": 1,
+          "y": 2,
+          "w": 4,
+          "h": 2,
+          "label": "8"
+        },
+        {
+          "raw_id": 1,
+          "x": 1,
+          "y": 4,
+          "w": 2,
+          "h": 2,
+          "label": "1"
+        },
+        {
+          "raw_id": 3,
+          "x": 3,
+          "y": 4,
+          "w": 2,
+          "h": 2,
+          "label": "3"
+        },
+        {
+          "raw_id": 2,
+          "x": 2,
+          "y": 6,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        }
+      ]
+    },
+    "46262": {
+      "name": "Big Tree",
+      "tier": "advanced",
+      "build_sequence_bottom_to_top": [
+        4,
+        6,
+        2,
+        6,
+        2
+      ],
+      "placement_area": {
+        "w": 6,
+        "h": 8
+      },
+      "alignment": {
+        "horizontal": "center",
+        "vertical": "bottom"
+      },
+      "blocks": [
+        {
+          "raw_id": 4,
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 2,
+          "label": "4"
+        },
+        {
+          "raw_id": 6,
+          "x": 0,
+          "y": 2,
+          "w": 4,
+          "h": 2,
+          "label": "6"
+        },
+        {
+          "raw_id": 2,
+          "x": 4,
+          "y": 2,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        },
+        {
+          "raw_id": 6,
+          "x": 1,
+          "y": 4,
+          "w": 4,
+          "h": 2,
+          "label": "6"
+        },
+        {
+          "raw_id": 2,
+          "x": 2,
+          "y": 6,
+          "w": 2,
+          "h": 2,
+          "label": "2"
+        }
+      ]
+    }
+  },
+  "notes": [
+    "1~4 are 2x2(w,h) raw materials.",
+    "5~8 are 4x2(w,h) raw materials.",
+    "All product blocks fit in the common 6x8(w,h) placement space.",
+    "Batch IDs 10~90 are not rendered in this asset file."
+  ]
+}

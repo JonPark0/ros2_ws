@@ -77,9 +77,18 @@ def default_order_directories() -> List[Path]:
 
 
 def find_default_order_file() -> Optional[str]:
-    """Auto-pick order_file when exactly one *.yaml/*.yml exists in a default dir."""
+    """Auto-pick order_file when exactly one *.yaml/*.yml exists in a default dir.
+
+    Directories are checked in order, and a directory that is ambiguous
+    (2+ files) or empty is skipped so the search continues to the next
+    candidate. This matters because the installed share directory is checked
+    first and colcon does not prune files deleted from the source tree — a
+    stale install/ copy must not mask a cleaned-up source orders/ dir.
+    """
+    searched: List[str] = []
     for directory in default_order_directories():
         if not directory.is_dir():
+            searched.append(f"{directory} (디렉토리 없음)")
             continue
         order_files = sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml"))
         if len(order_files) == 1:
@@ -88,12 +97,24 @@ def find_default_order_file() -> Optional[str]:
             print(
                 color(
                     f"[order_file] {directory}에 order 파일이 여러 개 있어 자동 선택할 수 없습니다: "
-                    f"{[f.name for f in order_files]}",
+                    f"{[f.name for f in order_files]} — 다음 후보 디렉토리를 확인합니다",
                     YELLOW + BOLD,
                 )
             )
-            print(color("order_file 파라미터로 사용할 파일을 지정하세요.", YELLOW + BOLD))
-            return None
+            searched.append(f"{directory} ({len(order_files)}개: {[f.name for f in order_files]})")
+            continue
+        searched.append(f"{directory} (yaml 없음)")
+
+    print(color("[order_file] 자동 선택 실패 — 확인한 위치:", YELLOW + BOLD))
+    for line in searched:
+        print(color(f"  - {line}", YELLOW))
+    print(
+        color(
+            "stale install 복사본이 원인이면 build/·install/의 eai_task_server를 지우고 "
+            "다시 빌드하거나, order_file 파라미터로 파일을 직접 지정하세요.",
+            YELLOW + BOLD,
+        )
+    )
     return None
 
 

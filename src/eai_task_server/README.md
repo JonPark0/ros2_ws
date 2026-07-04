@@ -130,13 +130,19 @@ ros2 run eai_task_server manual_order_server --ros-args -p order_file:=src/eai_t
 ### Default order file
 
 If `order_file` is not given, `manual_order_server` looks in
-[`orders/`](./orders) (the installed package share directory first, falling
-back to the source-tree `orders/` folder next to this package) and, **only if
-exactly one `*.yaml`/`*.yml` file is found there**, uses it automatically —
-so `ros2 run eai_task_server manual_order_server` with no arguments publishes
-that file non-interactively. If zero or more than one order file is present,
-it falls back to the interactive CLI (and prints the ambiguous file list so
-you can pass `order_file` explicitly instead).
+[`orders/`](./orders) (the installed package share directory first, then the
+source-tree `orders/` folder next to this package) and uses the first
+directory that contains **exactly one** `*.yaml`/`*.yml` file — so
+`ros2 run eai_task_server manual_order_server` with no arguments publishes
+that file non-interactively. A directory with zero or multiple order files is
+skipped (with the file list printed) and the search continues; if no
+candidate remains, it falls back to the interactive CLI.
+
+> **Stale install warning:** colcon does not delete files removed from the
+> source tree — after deleting an order file from `orders/`, the installed
+> share directory (checked first) may still hold the old copy. If auto-pick
+> keeps seeing files you deleted, clean-rebuild:
+> `rm -rf build/eai_task_server install/eai_task_server && colcon build --packages-select eai_task_server`
 
 > **Note:** this package currently ships two order files
 > ([`orders/example_order.yaml`](./orders/example_order.yaml) and

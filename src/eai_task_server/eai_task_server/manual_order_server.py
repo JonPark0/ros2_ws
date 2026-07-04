@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """Manual EAI-WS order server for the local World Cup 2026 station layout.
 
-난이도, 행동, side를 고른 뒤 제품 ID와 station별 material_ids를 직접 입력해
-/eai/task 와 side별 topic으로 발행한다.
+side를 고른 뒤 produce/recycle 개수와 제품 ID, station별 material_ids를
+직접 입력해 /eai/task 와 side별 topic으로 발행한다.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 import sys
-import termios
 import threading
-import time
-import tty
 from typing import Dict, List, Sequence
 
 import rclpy
@@ -31,9 +28,6 @@ from eai_task_server.order import (
     RAW_MATERIAL_IDS,
     SIDES,
     SIDE_LAYOUT,
-    STAGES,
-    STAGE_SPECS,
-    TIERS,
     YELLOW,
     build_net_materials,
     color,
@@ -98,40 +92,6 @@ class ManualOrderServer(Node):
             f"stations={len(side_b_task.arena_layout)}"
         )
 
-    def publish_until_planner_seen(
-        self,
-        task: Task,
-        label: str,
-        period_sec: float = 1.0,
-        post_subscriber_publishes: int = 5,
-    ) -> None:
-        """Publish repeatedly until /eai/task has a subscriber for a few sends."""
-        count = 0
-        observed_count = 0
-        self.get_logger().info(
-            f"publishing preset '{label}' repeatedly on {self.task_topic}; "
-            "Ctrl-C to stop early"
-        )
-        while rclpy.ok():
-            count += 1
-            self.publish_task_once(task)
-            subscribers = self.publisher.get_subscription_count()
-            if subscribers > 0:
-                observed_count += 1
-            else:
-                observed_count = 0
-
-            self.get_logger().info(
-                f"publish #{count}: /eai/task subscribers={subscribers}, "
-                f"confirmed_sends={observed_count}/{post_subscriber_publishes}"
-            )
-            if observed_count >= post_subscriber_publishes:
-                self.get_logger().info(
-                    f"preset '{label}' published after planner subscriber was observed"
-                )
-                return
-            time.sleep(max(period_sec, 0.1))
-
 
 def parse_int_list(raw: str) -> List[int]:
     if not raw.strip():
@@ -147,6 +107,14 @@ def print_catalog() -> None:
     print(color("[Product Catalog]", MAGENTA + BOLD))
     for product_id, product in sorted(PRODUCTS.items()):
         print(f"  {product_id:<5} {product.name:<14} materials={list(product.materials)}")
+
+
+def prompt_count(label: str) -> int:
+    while True:
+        raw = input(f"{label} 개수 입력: ").strip()
+        if raw.isdigit():
+            return int(raw)
+        print("0 이상의 정수를 입력하세요.")
 
 
 def prompt_product_ids(label: str, count: int) -> List[int]:
@@ -342,8 +310,6 @@ def build_side_only_task(task: Task, side_prefix: str) -> Task:
 
 
 def print_summary(
-    tier: str,
-    stage: str,
     side: str,
     produce_ids: Sequence[int],
     recycle_ids: Sequence[int],
@@ -353,9 +319,7 @@ def print_summary(
     selected_customer_id: int,
     customer_initial_ids: Sequence[int],
 ) -> None:
-    spec = STAGE_SPECS[(tier, stage)]
     selected_raw = sum(len(product_materials(pid)) for pid in list(produce_ids) + list(recycle_ids))
-    range_ok = spec.raw_min <= selected_raw <= spec.raw_max
     need = net_counter(produce_ids, recycle_ids)
     available = material_availability(material_by_station)
     missing = Counter(
@@ -365,15 +329,10 @@ def print_summary(
     print("")
     print(color("================ EAI-WS MANUAL ORDER ================", CYAN + BOLD))
     print(
-        f"tier={tier}  action={stage}  side={side.upper()}  "
+        f"side={side.upper()}  "
         f"workbench=S{selected_workbench_id:02d}  customer=S{selected_customer_id:02d}"
     )
-    print(
-        f"produce={len(produce_ids)}/{spec.produce_orders}, "
-        f"recycle={len(recycle_ids)}/{spec.recycle_returns}, "
-        f"raw={selected_raw} target={spec.raw_min}~{spec.raw_max} "
-        + color("[OK]" if range_ok else "[WARN]", GREEN if range_ok else YELLOW)
-    )
+    print(f"produce={len(produce_ids)}, recycle={len(recycle_ids)}, raw={selected_raw}")
 
     deferred_ids = [pid for pid in recycle_ids if pid not in customer_initial_ids]
 
@@ -418,195 +377,8 @@ def print_summary(
     print(color("=====================================================", CYAN + BOLD))
 
 
-PRESET_TASKS = {
-    "1": {
-        "label": "Beginner Lifecycle / Side A",
-        "tier": "beginner",
-        "stage": "lifecycle",
-        "side": "a",
-        "produce_ids": [241, 462],
-        "recycle_ids": [81, 711],
-        "order_names": {
-            241: "produce_traffic_light",
-            462: "produce_small_tree",
-            81: "recycle_e_stop",
-            711: "recycle_hammer",
-        },
-        "material_by_station": {
-            1: [10, 70],
-            2: [20, 40],
-            3: [60, 80],
-        },
-        "customer_initial_ids": [81, 711],
-    },
-    "2": {
-        "label": "Advanced Production / Side A",
-        "tier": "advanced",
-        "stage": "production",
-        "side": "a",
-        "produce_ids": [13, 462, 711, 48132],
-        "recycle_ids": [],
-        "order_names": {
-            13: "produce_magnet",
-            462: "produce_small_tree",
-            711: "produce_hammer",
-            48132: "produce_ice_cream",
-        },
-        "material_by_station": {
-            1: [80, 20, 40],
-            2: [60, 10],
-            3: [70, 30],
-        },
-        "customer_initial_ids": [],
-    },
-}
-
-
-def read_menu_key() -> str:
-    """Read one menu key. Returns 'left' for the left arrow."""
-    if not sys.stdin.isatty():
-        return input("> ").strip().lower()
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            rest = sys.stdin.read(2)
-            if rest == "[D":
-                print("←")
-                return "left"
-            return "escape"
-        print(ch)
-        return ch.strip().lower()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-
-def prompt_preset_choice() -> str:
-    while True:
-        print("")
-        print(color("=== EAI-WS Preset Order Server ===", CYAN + BOLD))
-        print("  1) Beginner Lifecycle / Side A")
-        print("     produce: 241 Traffic Light, 462 Small Tree")
-        print("     recycle: 81 E-Stop, 711 Hammer")
-        print("     S01=[10,70], S02=[20,40], S03=[60,80]")
-        print("  2) Advanced Production / Side A")
-        print("     produce: 13 Magnet, 462 Small Tree, 81, 48132 Ice Cream")
-        print("     S01=[20,40,80], S02=[10,60], S03=[30,70]")
-        print("  3) Manual input mode")
-        print("  ←) 이전 선택/뒤로")
-        print("> ", end="", flush=True)
-        key = read_menu_key()
-        if key in {"1", "2", "3"}:
-            return key
-        if key == "left":
-            print("이미 첫 메뉴입니다.")
-            continue
-        print("1, 2, 3 중 하나를 입력하세요.")
-
-
-def make_named_order(order_type: int, product_id: int, names: Dict[int, str]) -> Order:
-    return make_order(order_type, product_id, names.get(product_id))
-
-
-def build_preset_task(config: Dict) -> Task:
-    """Build a side-A preset task. S03 is sent as ST_STORAGE intentionally."""
-    side = config["side"]
-    layout = SIDE_LAYOUT[side]
-    names = config.get("order_names", {})
-    task = Task()
-    task.order_list = [
-        make_named_order(Order.OT_PRODUCE, pid, names)
-        for pid in config["produce_ids"]
-    ] + [
-        make_named_order(Order.OT_RECYCLE, pid, names)
-        for pid in config["recycle_ids"]
-    ]
-
-    material_by_station = config["material_by_station"]
-    stations = []
-    for idx, station_id in enumerate((1, 2, 3), start=1):
-        stations.append(
-            make_station(
-                Station.ST_STORAGE,
-                station_name(side, Station.ST_STORAGE, station_id, idx),
-                station_id,
-                material_by_station.get(station_id, []),
-            )
-        )
-
-    workbench_id = layout["workbench_ids"][0]
-    customer_id = layout["customer_ids"][0]
-    stations.append(
-        make_station(
-            Station.ST_WORKBENCH,
-            station_name(side, Station.ST_WORKBENCH, workbench_id, 1),
-            workbench_id,
-            [],
-        )
-    )
-    stations.append(
-        make_station(
-            Station.ST_CUSTOMER,
-            station_name(side, Station.ST_CUSTOMER, customer_id, 1),
-            customer_id,
-            config.get("customer_initial_ids", []),
-        )
-    )
-    task.arena_layout = stations
-    return task
-
-
-def print_preset_summary(config: Dict, task: Task) -> None:
-    print("")
-    print(color("================ EAI-WS PRESET TASK ================", CYAN + BOLD))
-    print(
-        f"preset={config['label']}  tier={config['tier']}  "
-        f"action={config['stage']}  side={config['side'].upper()}"
-    )
-    print(color("[ORDERS]", MAGENTA + BOLD))
-    for order in task.order_list:
-        kind = "PRODUCE" if order.order_type == Order.OT_PRODUCE else "RECYCLE"
-        product = PRODUCTS.get(order.product_id)
-        materials = list(product.materials) if product else []
-        style = GREEN + BOLD if kind == "PRODUCE" else YELLOW + BOLD
-        print(
-            color(f"  {kind:<7} ", style)
-            + f"name={order.name:<22} id={order.product_id:<6} materials={materials}"
-        )
-    print(color("[ARENA LAYOUT]", MAGENTA + BOLD))
-    for station in task.arena_layout:
-        print(
-            f"  S{station.station_id:02d} type={station.station_type} "
-            f"material_ids={list(station.material_ids)} name={station.name}"
-        )
-    print(color("====================================================", CYAN + BOLD))
-
-
-def confirm_or_back() -> str:
-    print("")
-    print(color("Enter: 발행 시작 / ←: 프리셋 다시 선택 / q: 종료", GREEN + BOLD))
-    if not sys.stdin.isatty():
-        raw = input("> ").strip().lower()
-        return "publish" if raw == "" else raw
-    while True:
-        print("> ", end="", flush=True)
-        key = read_menu_key()
-        if key == "":
-            return "publish"
-        if key == "left":
-            return "back"
-        if key == "q":
-            return "quit"
-        print("Enter, ←, q 중 하나를 누르세요.")
-
-
 def run_manual_cli(node: ManualOrderServer) -> None:
     print(color("=== EAI-WS Manual Order Server ===", CYAN + BOLD))
-    tier = prompt_choice("[난이도]  1) entry   2) beginner   3) advanced", TIERS)
-    stage = prompt_choice("[행동]    1) production  2) recycling  3) lifecycle", STAGES)
     side = prompt_choice("[side]    1) A  2) B", SIDES)
     layout = SIDE_LAYOUT[side]
     selected_workbench_id = layout["workbench_ids"][0]
@@ -620,9 +392,10 @@ def run_manual_cli(node: ManualOrderServer) -> None:
     )
     print(color("[layout] shared_storage_1=S07 is included for both sides.", GREEN + BOLD))
 
-    spec = STAGE_SPECS[(tier, stage)]
-    produce_ids = prompt_product_ids("PRODUCE", spec.produce_orders)
-    recycle_ids = prompt_product_ids("RECYCLE", spec.recycle_returns)
+    produce_count = prompt_count("PRODUCE 주문")
+    recycle_count = prompt_count("RECYCLE 주문")
+    produce_ids = prompt_product_ids("PRODUCE", produce_count)
+    recycle_ids = prompt_product_ids("RECYCLE", recycle_count)
     customer_initial_ids = prompt_customer_initial_ids(recycle_ids)
     material_by_station = prompt_station_materials(side)
     task = build_task(
@@ -635,8 +408,6 @@ def run_manual_cli(node: ManualOrderServer) -> None:
         customer_initial_ids,
     )
     print_summary(
-        tier,
-        stage,
         side,
         produce_ids,
         recycle_ids,
@@ -650,25 +421,9 @@ def run_manual_cli(node: ManualOrderServer) -> None:
     node.publish_task(task)
 
 
-
 def run_cli(node: ManualOrderServer) -> None:
-    while True:
-        selected = prompt_preset_choice()
-        if selected == "3":
-            run_manual_cli(node)
-            return
+    run_manual_cli(node)
 
-        config = PRESET_TASKS[selected]
-        task = build_preset_task(config)
-        print_preset_summary(config, task)
-        action = confirm_or_back()
-        if action == "back":
-            continue
-        if action == "quit":
-            print("preset publish cancelled")
-            return
-        node.publish_until_planner_seen(task, config["label"])
-        return
 
 def main(args=None) -> None:
     sys.stdout.reconfigure(line_buffering=True)

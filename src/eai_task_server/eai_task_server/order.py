@@ -26,14 +26,6 @@ class Product:
     materials: Sequence[int]
 
 
-@dataclass(frozen=True)
-class StageSpec:
-    produce_orders: int
-    recycle_returns: int
-    raw_min: int
-    raw_max: int
-
-
 RAW_MATERIAL_IDS = tuple(range(1, 9))
 
 PRODUCTS: Dict[int, Product] = {
@@ -50,8 +42,6 @@ PRODUCTS: Dict[int, Product] = {
     46262: Product("Big Tree", (4, 6, 2, 6, 2)),
 }
 
-TIERS = ("entry", "beginner", "advanced")
-STAGES = ("production", "recycling", "lifecycle")
 SIDES = ("a", "b")
 
 # Current local World Cup 2026 station map.
@@ -79,19 +69,6 @@ SIDE_LAYOUT = {
         "customer_ids": (8,),
     },
 }
-
-STAGE_SPECS: Dict[tuple[str, str], StageSpec] = {
-    ("entry", "production"): StageSpec(1, 0, 2, 2),
-    ("entry", "recycling"): StageSpec(0, 1, 2, 2),
-    ("entry", "lifecycle"): StageSpec(2, 1, 4, 6),
-    ("beginner", "production"): StageSpec(2, 0, 4, 6),
-    ("beginner", "recycling"): StageSpec(0, 2, 4, 6),
-    ("beginner", "lifecycle"): StageSpec(3, 2, 7, 13),
-    ("advanced", "production"): StageSpec(5, 0, 7, 13),
-    ("advanced", "recycling"): StageSpec(0, 5, 7, 13),
-    ("advanced", "lifecycle"): StageSpec(5, 5, 12, 28),
-}
-
 
 def color(text: str, style: str) -> str:
     return f"{style}{text}{RESET}"

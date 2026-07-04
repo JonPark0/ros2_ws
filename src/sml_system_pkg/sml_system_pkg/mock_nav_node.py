@@ -13,10 +13,13 @@ import math
 import time
 
 import rclpy
+import yaml
 from rclpy.action import ActionServer
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from geometry_msgs.msg import Point, Pose, PoseWithCovariance, Quaternion, Twist, TwistWithCovariance
+from nav_msgs.msg import Odometry
 from std_srvs.srv import Trigger
 
 from robocup_pkg.action import NavTask
@@ -30,6 +33,17 @@ from sml_system_pkg.arena_side_utils import (
 DEFAULT_STATION_COORD_JSON_PATH = (
     '/home/st02/ros2_ws/src/sml_system_pkg/config/station_coordinates_a_zone.json'
 )
+
+try:
+    from ament_index_python.packages import get_package_share_directory
+    import os as _os
+    DEFAULT_WAYPOINT_YAML_PATH = _os.path.join(
+        get_package_share_directory('robocup_planner'), 'config', 'robocup_waypoint.yaml'
+    )
+except Exception:
+    DEFAULT_WAYPOINT_YAML_PATH = ''
+
+ODOM_PUBLISH_HZ = 10.0
 
 
 class MockNavNode(Node):
@@ -46,6 +60,8 @@ class MockNavNode(Node):
         self.declare_parameter('side', 'a')
         self.declare_parameter('start_station_id', -1)
         self.declare_parameter('station_coord_json_path', DEFAULT_STATION_COORD_JSON_PATH)
+        self.declare_parameter('waypoint_yaml', DEFAULT_WAYPOINT_YAML_PATH)
+        self.declare_parameter('publish_odom', True)
 
         self.side = normalize_side(self.get_parameter('side').value)
         configured_start = int(self.get_parameter('start_station_id').value)
@@ -57,7 +73,23 @@ class MockNavNode(Node):
         # Track whether the AMR is stopped at a sub_goal (mid-approach).
         # When the next goal leg targets the same station, only 20% remains.
         self._at_subgoal_of: int = -1
+        # Prefer the real robocup_waypoint.yaml (same file the real planner and
+        # navigator use) over the legacy station_coordinates_a_zone.json;
+        # fall back to the JSON entries for any station id the YAML lacks
+        # (the navigator team's waypoint file is still WIP as of this writing).
         self.station_coords = self._load_station_coords()
+        self.station_coords.update(self._load_waypoint_yaml())
+
+        # Current simulated (x, y) position in the same coordinate space as
+        # station_coords, used only to drive the odom publisher below —
+        # entirely separate from current_station_id (which drives NavTask
+        # logic/timing and is left untouched).
+        self._current_xy = self._station_coord(self.current_station_id)
+
+        publish_odom = bool(self.get_parameter('publish_odom').value)
+        self._odom_pub = (
+            self.create_publisher(Odometry, '/odom', 10) if publish_odom else None
+        )
 
         self._action_server = ActionServer(
             self,
@@ -104,6 +136,39 @@ class MockNavNode(Node):
             )
             return {}
 
+    def _load_waypoint_yaml(self):
+        """Load station_N_goal positions from the real robocup_waypoint.yaml.
+
+        Same shape as robocup_planner/planning/distance_calculator.py, so the
+        odometry this node simulates stays consistent with whatever the real
+        planner/navigator would use for the same file.
+        """
+        path = str(self.get_parameter('waypoint_yaml').value).strip()
+        if not path:
+            return {}
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+            waypoints = data.get('waypoints', {})
+            coords = {}
+            for i in range(0, 21):
+                wp = waypoints.get(f'station_{i}_goal')
+                if wp:
+                    coords[i] = (
+                        float(wp['position']['x']),
+                        float(wp['position']['y']),
+                    )
+            self.get_logger().info(
+                f'[MOCK NAV] waypoint_yaml 좌표 로드 완료: {len(coords)}개, path={path}'
+            )
+            return coords
+        except Exception as exc:
+            self.get_logger().warn(
+                f'[MOCK NAV] waypoint_yaml 로드 실패: {exc}. '
+                'station_coordinates_a_zone.json만 사용합니다.'
+            )
+            return {}
+
     def _station_coord(self, station_id: int):
         station_id = int(station_id)
         if station_id in self.station_coords:
@@ -130,6 +195,51 @@ class MockNavNode(Node):
         speed = max(float(self.get_parameter('amr_speed_mps').value), 1e-6)
         overhead = max(0.0, float(self.get_parameter('nav_overhead_sec').value))
         return overhead + dist / speed
+
+    def _publish_odom(self, x: float, y: float, yaw: float = 0.0) -> None:
+        if self._odom_pub is None:
+            return
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.child_frame_id = 'base_link'
+        msg.pose = PoseWithCovariance()
+        msg.pose.pose = Pose(
+            position=Point(x=float(x), y=float(y), z=0.0),
+            orientation=Quaternion(
+                x=0.0, y=0.0, z=math.sin(yaw / 2.0), w=math.cos(yaw / 2.0)
+            ),
+        )
+        msg.twist = TwistWithCovariance()
+        msg.twist.twist = Twist()
+        self._odom_pub.publish(msg)
+
+    def _sleep_and_publish_odom(self, target_xy, duration: float) -> None:
+        """Sleep for `duration` seconds, publishing interpolated /odom updates
+        along the way (10 Hz) instead of a single blind time.sleep(). This is
+        the only source of live AMR position telemetry during simulation —
+        the real robot publishes the same Odometry message via
+        robocup_navigator/current_pose.py, so GUI consumers use one code path
+        for both sim and real-world monitoring."""
+        sx, sy = self._current_xy
+        tx, ty = target_xy
+        yaw = math.atan2(ty - sy, tx - sx) if (tx, ty) != (sx, sy) else 0.0
+
+        if duration <= 0.0 or self._odom_pub is None:
+            time.sleep(max(0.0, duration))
+            self._current_xy = (tx, ty)
+            self._publish_odom(tx, ty, yaw)
+            return
+
+        steps = max(1, int(duration * ODOM_PUBLISH_HZ))
+        step_dt = duration / steps
+        for i in range(1, steps + 1):
+            time.sleep(step_dt)
+            t = i / steps
+            x = sx + (tx - sx) * t
+            y = sy + (ty - sy) * t
+            self._current_xy = (x, y)
+            self._publish_odom(x, y, yaw)
 
     def _execute_cb(self, goal_handle):
         raw_id = int(goal_handle.request.station_id)
@@ -163,7 +273,8 @@ class MockNavNode(Node):
         fb.status = 'MOVING'
         goal_handle.publish_feedback(fb)
 
-        time.sleep(delay_sec)
+        target_xy = self._station_coord(station_id)
+        self._sleep_and_publish_odom(target_xy, delay_sec)
 
         fb.status = 'AT_SUBGOAL' if is_subgoal else 'ARRIVED'
         goal_handle.publish_feedback(fb)

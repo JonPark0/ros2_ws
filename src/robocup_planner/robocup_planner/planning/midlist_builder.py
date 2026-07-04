@@ -15,13 +15,40 @@ bidlist — same format as midlist, but for batch stations.
 mid     — midlist filtered to only the materials in net_aidlist,
           preserving distance order. This is the ordered pickup sequence
           the executor follows.
+
+Visit ordering — weight-adjusted, not pure distance:
+          Every builder below sorts by `distance / weight(station_id)`
+          instead of raw distance. `weight` comes from an optional
+          `station_weights` map (default 1.0, i.e. unchanged pure-distance
+          order), configurable at runtime via the planner's
+          `station_priority_weights_json` parameter — a station considered
+          more important (e.g. it holds a scarce/urgent material) can be
+          moved earlier in the visit order even if it isn't the closest.
+          The stored `distance` field itself always stays the physical
+          (Bezier-curve) distance — only the sort key is weight-adjusted —
+          so downstream consumers of `distance` are unaffected.
 """
 
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from robocup_planner.planning.distance_calculator import DistanceCalculator
-from robocup_planner.product_catalog import BATCH_TO_MATERIAL, BATCH_COUNT, MIX_BATCH_ID
+from robocup_planner.product_catalog import (
+    BATCH_TO_MATERIAL, BATCH_COUNT, MIX_BATCH_ID, get_material_count,
+)
+
+
+def _priority_key(entry: Dict, station_weights: Optional[Dict[int, float]]):
+    """Sort key: distance divided by the station's configured weight.
+
+    Higher weight -> lower key -> visited earlier. Default weight is 1.0,
+    which reproduces the original pure-distance ordering exactly.
+    """
+    weight = 1.0
+    if station_weights:
+        weight = station_weights.get(entry['station_id'], 1.0)
+    weight = max(float(weight), 1e-9)
+    return entry['distance'] / weight
 
 
 # Each midlist / bidlist entry (one station visit):
@@ -40,16 +67,18 @@ def build_storage_midlist(
     storage_stations: List[Dict],
     calc: DistanceCalculator,
     ref_station_id: int,
+    station_weights: Optional[Dict[int, float]] = None,
 ) -> List[Dict]:
     """
-    Sort storage stations by Euclidean distance from ref_station_id.
+    Sort storage stations by Bezier-curve distance from ref_station_id,
+    adjusted by station_weights (see module docstring).
     ref_station_id is 0 (home) normally, or the workbench ID when recycling.
     """
     ref_pos = calc.get_position(ref_station_id) or (0.0, 0.0)
     entries = []
     for st in storage_stations:
         sid = st['station_id']
-        dist = calc.point_to_station(ref_pos[0], ref_pos[1], sid)
+        dist = calc.bezier_point_to_station(ref_pos[0], ref_pos[1], sid)
         entries.append({
             'station_id': sid,
             'materials': list(st['material_ids']),
@@ -57,7 +86,7 @@ def build_storage_midlist(
             'is_recycle_pickup': False,
             'recycle_product_id': None,
         })
-    entries.sort(key=lambda e: e['distance'])
+    entries.sort(key=lambda e: _priority_key(e, station_weights))
     return entries
 
 
@@ -66,10 +95,12 @@ def build_recycle_phase_entries(
     recycle_orders: List[Dict],
     calc: DistanceCalculator,
     ref_station_id: int,
+    station_weights: Optional[Dict[int, float]] = None,
 ) -> List[Dict]:
     """
     Build Phase 1 entries: visits to customer counters to collect products
-    that need to be recycled. Sorted by distance from ref_station_id (home).
+    that need to be recycled. Sorted by Bezier-curve distance from
+    ref_station_id (home), adjusted by station_weights.
 
     recycle_orders: list of {'station_id': int, 'product_id': int}
                     mapping each recycled product to its customer counter.
@@ -78,7 +109,7 @@ def build_recycle_phase_entries(
     entries = []
     for order in recycle_orders:
         sid = order['station_id']
-        dist = calc.point_to_station(ref_pos[0], ref_pos[1], sid)
+        dist = calc.bezier_point_to_station(ref_pos[0], ref_pos[1], sid)
         entries.append({
             'station_id': sid,
             'materials': [],
@@ -86,7 +117,7 @@ def build_recycle_phase_entries(
             'is_recycle_pickup': True,
             'recycle_product_id': order['product_id'],
         })
-    entries.sort(key=lambda e: e['distance'])
+    entries.sort(key=lambda e: _priority_key(e, station_weights))
     return entries
 
 
@@ -95,6 +126,7 @@ def build_bidlist(
     calc: DistanceCalculator,
     ref_station_id: int,
     include_mix: bool = False,
+    station_weights: Optional[Dict[int, float]] = None,
 ) -> List[Dict]:
     """
     Build a distance-sorted list of batch station entries.
@@ -103,13 +135,14 @@ def build_bidlist(
     - IDs 10-80: each resolved to BATCH_COUNT units of the raw material.
     - ID 90:     included only when include_mix=True; materials=[], is_mix_batch=True.
 
-    Entries sorted by Euclidean distance from ref_station_id.
+    Entries sorted by Bezier-curve distance from ref_station_id, adjusted
+    by station_weights.
     """
     ref_pos = calc.get_position(ref_station_id) or (0.0, 0.0)
     entries = []
     for st in batch_stations:
         sid = st['station_id']
-        dist = calc.point_to_station(ref_pos[0], ref_pos[1], sid)
+        dist = calc.bezier_point_to_station(ref_pos[0], ref_pos[1], sid)
         materials: List[int] = []
         is_mix = False
         for bid in st['batch_ids']:
@@ -131,18 +164,23 @@ def build_bidlist(
                 'is_batch': True,
                 'is_mix_batch': is_mix,
             })
-    entries.sort(key=lambda e: e['distance'])
+    entries.sort(key=lambda e: _priority_key(e, station_weights))
     return entries
 
 
-def merge_into_midlist(midlist: List[Dict], bidlist: List[Dict]) -> List[Dict]:
+def merge_into_midlist(
+    midlist: List[Dict],
+    bidlist: List[Dict],
+    station_weights: Optional[Dict[int, float]] = None,
+) -> List[Dict]:
     """
     Insert bidlist entries into the storage phase of midlist, maintaining
-    distance order.  Phase 1 (is_recycle_pickup=True) entries are not moved.
+    weight-adjusted distance order.  Phase 1 (is_recycle_pickup=True)
+    entries are not moved.
     """
     phase1 = [e for e in midlist if e.get('is_recycle_pickup')]
     phase2 = [e for e in midlist if not e.get('is_recycle_pickup')]
-    merged = sorted(phase2 + bidlist, key=lambda e: e['distance'])
+    merged = sorted(phase2 + bidlist, key=lambda e: _priority_key(e, station_weights))
     return phase1 + merged
 
 
@@ -187,6 +225,7 @@ def build_full_midlist(
     batch_stations_1080: Optional[List[Dict]] = None,
     batch_stations_90: Optional[List[Dict]] = None,
     missing_for_mix: Optional[Counter] = None,
+    station_weights: Optional[Dict[int, float]] = None,
 ) -> List[Dict]:
     """
     Assemble the complete midlist:
@@ -194,10 +233,14 @@ def build_full_midlist(
       Phase 2: storage pickups, sorted from the correct reference point
                (workbench if recycling, home otherwise).
                Batch entries (10-80 and 90) are merged in distance order.
+    Every phase is ordered by weight-adjusted Bezier-curve distance — see
+    station_weights in the module docstring.
 
     batch_stations_1080: [{'station_id', 'batch_ids'}] — merged into Phase 2 when provided.
     batch_stations_90:   [{'station_id', 'batch_ids': [90]}] — merged when missing_for_mix given.
     missing_for_mix:     Counter of materials to assign arbitrarily to mix batch stations.
+    station_weights:     optional {station_id: weight} map; higher weight moves a
+                         station earlier in the visit order relative to its distance.
 
     Returns the concatenated list.  Phase 1 entries are marked is_recycle_pickup=True.
     """
@@ -205,22 +248,24 @@ def build_full_midlist(
 
     if needs_recycling:
         phase1 = build_recycle_phase_entries(
-            customer_stations, recycle_orders, calc, home_station_id
+            customer_stations, recycle_orders, calc, home_station_id, station_weights
         )
     else:
         phase1 = []
 
-    phase2 = build_storage_midlist(storage_stations, calc, phase2_ref)
+    phase2 = build_storage_midlist(storage_stations, calc, phase2_ref, station_weights)
 
     if batch_stations_1080:
-        bidlist_1080 = build_bidlist(batch_stations_1080, calc, phase2_ref)
-        phase2 = merge_into_midlist(phase2, bidlist_1080)
+        bidlist_1080 = build_bidlist(batch_stations_1080, calc, phase2_ref, station_weights=station_weights)
+        phase2 = merge_into_midlist(phase2, bidlist_1080, station_weights)
 
     if batch_stations_90 and missing_for_mix:
-        bidlist_90 = build_bidlist(batch_stations_90, calc, phase2_ref, include_mix=True)
+        bidlist_90 = build_bidlist(
+            batch_stations_90, calc, phase2_ref, include_mix=True, station_weights=station_weights
+        )
         assigned_90 = assign_mix_batch_materials(bidlist_90, missing_for_mix)
         if assigned_90:
-            phase2 = merge_into_midlist(phase2, assigned_90)
+            phase2 = merge_into_midlist(phase2, assigned_90, station_weights)
 
     return phase1 + phase2
 
@@ -245,6 +290,52 @@ def check_storage_satisfies(
             missing[mat_id] = shortfall
 
     return (len(missing) == 0, missing)
+
+
+def compute_completion_indices(
+    mid: List[Dict],
+    product_ids: List[int],
+) -> Dict[int, int]:
+    """Estimate, for each product_id, how far into the storage pickup
+    sequence its full material set would first be available.
+
+    Flattens the non-recycle pickup_materials across `mid` (already in
+    distance order) into one timeline, then for each product finds the step
+    index of the last unit it needs — as if that product had exclusive claim
+    on the materials it needs. This ignores contention between products
+    competing for the same material type, but that's an acceptable
+    approximation: it's used only to rank which products are likely to
+    complete soonest, not to schedule exact pickups.
+
+    Products whose materials never fully appear in `mid` (e.g. covered
+    entirely by recycling) get an index of len(flat_materials) — treated as
+    "completes last" — so they don't out-rank products with real evidence of
+    an early completion.
+
+    Returns {product_id: step_index}.
+    """
+    flat_materials: List[int] = []
+    for entry in mid:
+        if entry.get('is_recycle_pickup'):
+            continue
+        flat_materials.extend(entry.get('pickup_materials', []))
+
+    positions_by_material: Dict[int, List[int]] = {}
+    for idx, mat_id in enumerate(flat_materials):
+        positions_by_material.setdefault(mat_id, []).append(idx)
+
+    unreachable = len(flat_materials)
+    result: Dict[int, int] = {}
+    for pid in product_ids:
+        last_pos = -1
+        for mat_id, count in get_material_count(pid).items():
+            avail = positions_by_material.get(mat_id, [])
+            if len(avail) < count:
+                last_pos = unreachable
+                break
+            last_pos = max(last_pos, avail[count - 1])
+        result[pid] = max(last_pos, 0)
+    return result
 
 
 def build_mid(

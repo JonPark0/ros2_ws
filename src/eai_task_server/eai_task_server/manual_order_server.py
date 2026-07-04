@@ -130,18 +130,62 @@ def prompt_product_ids(label: str, count: int) -> List[int]:
         return product_ids
 
 
+def prompt_customer_initial_ids(recycle_ids: Sequence[int]) -> List[int]:
+    """Ask which recycle_ids already sit on the customer counter at plan time.
+
+    The planner (planner_node.py) splits each recycle order into "immediate"
+    (Phase 1: picked straight off the counter) or "deferred" (produce it
+    first, deliver it, then recycle it — Executor._run_deferred_recycle_phase())
+    by checking whether the product_id is present in the customer station's
+    material_ids in the *initial* arena_layout. Defaulting to "all on the
+    table" (as before) makes every recycle order immediate and makes it
+    impossible to exercise the deferred/lifecycle path from this CLI.
+    """
+    if not recycle_ids:
+        return []
+
+    print("")
+    print(color("[Customer Table Initial Stock]", MAGENTA + BOLD))
+    print("recycle_id 중 지금 customer table 위에 이미 놓여 있는 product만 선택하세요.")
+    print("선택되지 않은 recycle_id는 planner가 deferred recycle "
+          "(생산 후 납품 -> 회수 -> 분해)로 처리합니다.")
+    print(f"recycle 대상: {list(recycle_ids)}")
+    while True:
+        raw = input(
+            "이미 table 위에 있는 product_id 입력 (전부: Enter, 없음: none): "
+        ).strip()
+        if raw == "":
+            return list(recycle_ids)
+        if raw.lower() == "none":
+            return []
+        try:
+            chosen = parse_int_list(raw)
+        except ValueError:
+            print("숫자만 입력하세요.")
+            continue
+        invalid = [pid for pid in chosen if pid not in recycle_ids]
+        if invalid:
+            print(f"recycle 대상이 아닌 product_id: {invalid}")
+            continue
+        return chosen
+
+
 def prompt_station_materials(side: str) -> Dict[int, List[int]]:
     layout = SIDE_LAYOUT[side]
-    storage_ids = tuple(layout["storage_ids"])
+    # Hybrid stations are read by the planner exactly like storage stations
+    # when building the initial aidlist (planner_node.py checks
+    # station_type in (ST_STORAGE, ST_HYBRID)), so they take the same
+    # material_ids input here.
+    station_ids = tuple(layout["storage_ids"]) + tuple(layout["hybrid_ids"])
     out: Dict[int, List[int]] = {}
 
     print("")
     print(color("[Station Material Input]", MAGENTA + BOLD))
-    print("현재 환경에서는 storage/shared storage station에만 초기 material_ids를 둡니다.")
+    print("storage/shared storage/hybrid station에 초기 material_ids를 둘 수 있습니다.")
     print("개별 재료는 1~8, known batch는 10/20/.../80, mix batch는 90입니다.")
     print("비워두면 해당 station material_ids=[] 입니다.")
 
-    for station_id in storage_ids:
+    for station_id in station_ids:
         while True:
             raw = input(f"  S{station_id:02d} material_ids: ").strip()
             try:
@@ -184,6 +228,7 @@ def build_task(
     material_by_station: Dict[int, List[int]],
     selected_workbench_id: int,
     selected_customer_id: int,
+    customer_initial_ids: Sequence[int],
 ) -> Task:
     layout = SIDE_LAYOUT[side]
     task = Task()
@@ -224,7 +269,7 @@ def build_task(
                 Station.ST_HYBRID,
                 station_name(side, Station.ST_HYBRID, station_id, idx),
                 station_id,
-                [],
+                material_by_station.get(station_id, []),
             )
         )
 
@@ -233,7 +278,7 @@ def build_task(
             Station.ST_CUSTOMER,
             station_name(side, Station.ST_CUSTOMER, selected_customer_id, 1),
             selected_customer_id,
-            list(recycle_ids),
+            list(customer_initial_ids),
         )
     )
     task.arena_layout = stations
@@ -269,6 +314,7 @@ def print_summary(
     task: Task,
     selected_workbench_id: int,
     selected_customer_id: int,
+    customer_initial_ids: Sequence[int],
 ) -> None:
     spec = STAGE_SPECS[(tier, stage)]
     selected_raw = sum(len(product_materials(pid)) for pid in list(produce_ids) + list(recycle_ids))
@@ -292,6 +338,8 @@ def print_summary(
         + color("[OK]" if range_ok else "[WARN]", GREEN if range_ok else YELLOW)
     )
 
+    deferred_ids = [pid for pid in recycle_ids if pid not in customer_initial_ids]
+
     print("")
     print(color("[ORDER LIST]", MAGENTA + BOLD))
     for pid in produce_ids:
@@ -299,7 +347,20 @@ def print_summary(
         print(color("  PRODUCE ", GREEN + BOLD) + f"{product.name:<14} id={pid:<5} materials={list(product.materials)}")
     for pid in recycle_ids:
         product = PRODUCTS[pid]
-        print(color("  RECYCLE ", YELLOW + BOLD) + f"{product.name:<14} id={pid:<5} materials={list(product.materials)}")
+        phase_tag = "immediate" if pid in customer_initial_ids else "deferred"
+        print(
+            color("  RECYCLE ", YELLOW + BOLD)
+            + f"{product.name:<14} id={pid:<5} materials={list(product.materials)} "
+            + f"({phase_tag})"
+        )
+    if deferred_ids:
+        print(
+            color(
+                f"  [lifecycle] deferred recycle (produce -> deliver -> reclaim -> disassemble): "
+                f"{deferred_ids}",
+                CYAN + BOLD,
+            )
+        )
 
     print("")
     print(color("[MATERIAL CHECK]", MAGENTA + BOLD))
@@ -340,6 +401,7 @@ def run_cli(node: ManualOrderServer) -> None:
     spec = STAGE_SPECS[(tier, stage)]
     produce_ids = prompt_product_ids("PRODUCE", spec.produce_orders)
     recycle_ids = prompt_product_ids("RECYCLE", spec.recycle_returns)
+    customer_initial_ids = prompt_customer_initial_ids(recycle_ids)
     material_by_station = prompt_station_materials(side)
     task = build_task(
         side,
@@ -348,6 +410,7 @@ def run_cli(node: ManualOrderServer) -> None:
         material_by_station,
         selected_workbench_id,
         selected_customer_id,
+        customer_initial_ids,
     )
     print_summary(
         tier,
@@ -359,6 +422,7 @@ def run_cli(node: ManualOrderServer) -> None:
         task,
         selected_workbench_id,
         selected_customer_id,
+        customer_initial_ids,
     )
     input(color("Enter를 누르면 /eai/task 와 side별 topic으로 발행합니다.", GREEN + BOLD))
     node.publish_task(task)

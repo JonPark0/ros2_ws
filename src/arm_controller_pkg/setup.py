@@ -1,3 +1,5 @@
+import os
+from glob import glob
 from setuptools import find_packages, setup
 
 package_name = 'arm_controller_pkg'
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+	(os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,6 +28,7 @@ setup(
             'cargo_manager_node = arm_controller_pkg.cargo_manager_node:main',
             'gripper_node = arm_controller_pkg.gripper_node:main',
             'amr_robot_node = arm_controller_pkg.amr_robot_node:main',
+            'manual_command_node = arm_controller_pkg.manual_command_node:main',
         ],
     },
 )

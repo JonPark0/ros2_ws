@@ -14,6 +14,7 @@ It also publishes RViz markers and a nav_msgs/Path showing the estimated route.
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 from collections import Counter
@@ -188,6 +189,20 @@ class SmlTimeEstimatorNode(Node):
         self.declare_parameter('assemble_time_sec_per_connection', DEFAULT_ASSEMBLE_TIME_SEC_PER_CONNECTION)
         self.declare_parameter('wb_produce_time_sec_per_connection', DEFAULT_WB_PRODUCE_TIME_SEC_PER_CONNECTION)
         self.declare_parameter('wb_recycle_time_sec_per_connection', DEFAULT_WB_RECYCLE_TIME_SEC_PER_CONNECTION)
+        # Per-workbench-number time overrides. JSON string keyed by the
+        # numbered workbench station_id, e.g. '{"4": {"produce": 8.0,
+        # "recycle": 9.0}}' — a station not listed falls back to the
+        # global wb_produce/recycle_time_sec_per_connection above. Lets
+        # different physical workbenches (different arm/gripper speed) be
+        # modeled without changing the global defaults.
+        self.declare_parameter('wb_time_sec_per_connection_by_station_json', '')
+        # Route-ordering weight and Bezier-curve distance model — mirrors
+        # robocup_planner_node so this dry-run estimate reflects the same
+        # planned route (see planning/distance_calculator.py and
+        # planning/midlist_builder.py for details).
+        self.declare_parameter('station_priority_weights_json', '')
+        self.declare_parameter('bezier_approach_line_length', 0.30)
+        self.declare_parameter('bezier_curve_samples', 16)
 
         self.side = normalize_side(self.get_parameter('side').value)
         self.fixed_workbench_station = side_to_fixed_workbench_station(self.side)
@@ -202,9 +217,20 @@ class SmlTimeEstimatorNode(Node):
         self.map_info = self._load_map_info(self.get_parameter('map_yaml_path').value)
         self.nav2_info = self._load_nav2_info(self.get_parameter('nav2_params_path').value)
 
+        self._station_weights = self._load_json_id_float_map(
+            'station_priority_weights_json', 'station priority weights'
+        )
+        self._wb_time_overrides = self._load_wb_time_overrides(
+            'wb_time_sec_per_connection_by_station_json'
+        )
+
         self._distance_calc = None
         try:
-            self._distance_calc = DistanceCalculator(waypoint_path)
+            self._distance_calc = DistanceCalculator(
+                waypoint_path,
+                approach_line_length=self._p('bezier_approach_line_length'),
+                bezier_samples=int(self.get_parameter('bezier_curve_samples').value),
+            )
         except Exception as exc:
             self.get_logger().warn(
                 f'[TIME EST] DistanceCalculator load failed: {exc}; planning order may be less accurate'
@@ -241,7 +267,10 @@ class SmlTimeEstimatorNode(Node):
             f'side={self.side}, start={self.start_station_id}, '
             f'waypoints={waypoint_path}, '
             f'avg_linear={self._p("avg_linear_speed_mps"):.2f}m/s, '
-            f'avg_angular={self._p("avg_angular_speed_radps"):.2f}rad/s'
+            f'avg_angular={self._p("avg_angular_speed_radps"):.2f}rad/s, '
+            f'bezier_approach_line={self._p("bezier_approach_line_length"):.2f}m, '
+            f'station_priority_weights={self._station_weights}, '
+            f'wb_time_overrides={self._wb_time_overrides}'
         )
         self._log_navigation_assumptions()
 
@@ -295,6 +324,44 @@ class SmlTimeEstimatorNode(Node):
 
     def _p(self, name: str) -> float:
         return float(self.get_parameter(name).value)
+
+    def _load_json_id_float_map(self, param_name: str, label: str) -> Dict[int, float]:
+        """Parse a '{"<id>": <float>, ...}' JSON parameter into {int: float}."""
+        raw = str(self.get_parameter(param_name).value or '').strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            result = {int(k): float(v) for k, v in parsed.items()}
+            self.get_logger().info(f'[TIME EST] {label} loaded: {result}')
+            return result
+        except Exception as exc:
+            self.get_logger().warn(
+                f'[TIME EST] {param_name} parse failed: {exc}; using defaults'
+            )
+            return {}
+
+    def _load_wb_time_overrides(self, param_name: str) -> Dict[int, Dict[str, float]]:
+        """Parse '{"<station_id>": {"produce": s, "recycle": s}}' overrides."""
+        raw = str(self.get_parameter(param_name).value or '').strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            result: Dict[int, Dict[str, float]] = {}
+            for station_id, entry in parsed.items():
+                if not isinstance(entry, dict):
+                    continue
+                result[int(station_id)] = {
+                    str(k).lower(): float(v) for k, v in entry.items()
+                }
+            self.get_logger().info(f'[TIME EST] per-workbench time overrides loaded: {result}')
+            return result
+        except Exception as exc:
+            self.get_logger().warn(
+                f'[TIME EST] {param_name} parse failed: {exc}; using global defaults'
+            )
+            return {}
 
     # ------------------------------------------------------------------
     # Task -> plan -> estimate
@@ -408,7 +475,9 @@ class SmlTimeEstimatorNode(Node):
         )
 
         if self._distance_calc:
-            storage_mid = build_storage_midlist(storage_stations, self._distance_calc, home_id)
+            storage_mid = build_storage_midlist(
+                storage_stations, self._distance_calc, home_id, self._station_weights
+            )
         else:
             storage_mid = [
                 {
@@ -426,7 +495,10 @@ class SmlTimeEstimatorNode(Node):
         if not satisfied and batch_stations_1080:
             use_batch_1080 = True
             if self._distance_calc:
-                bidlist_1080 = build_bidlist(batch_stations_1080, self._distance_calc, home_id)
+                bidlist_1080 = build_bidlist(
+                    batch_stations_1080, self._distance_calc, home_id,
+                    station_weights=self._station_weights,
+                )
             else:
                 bidlist_1080 = [
                     {
@@ -466,6 +538,7 @@ class SmlTimeEstimatorNode(Node):
                 batch_stations_1080=batch_stations_1080 if use_batch_1080 else None,
                 batch_stations_90=batch_stations_90 if missing_for_mix else None,
                 missing_for_mix=missing_for_mix,
+                station_weights=self._station_weights,
             )
         else:
             full_midlist = [
@@ -549,7 +622,9 @@ class SmlTimeEstimatorNode(Node):
                 from_station_id=None,
                 depends_on=[step_id - 1] if step_id > 0 else [],
             )
-            estimate.wb_time_sec = self._workbench_time_for_product(int(product_id), action)
+            estimate.wb_time_sec = self._workbench_time_for_product(
+                int(product_id), action, int(plan.workbench_station_id)
+            )
             estimate.total_sec = estimate.wb_time_sec
             estimates.append(estimate)
             return estimate
@@ -766,8 +841,18 @@ class SmlTimeEstimatorNode(Node):
             estimate.total_sec = estimate.nav_time_sec
         return estimate
 
-    def _workbench_time_for_product(self, product_id: int, action: str) -> float:
+    def _workbench_time_for_product(
+        self, product_id: int, action: str, station_id: Optional[int] = None
+    ) -> float:
+        """Per-connection WB time, optionally overridden per numbered
+        workbench station (see wb_time_sec_per_connection_by_station_json)."""
         connections = self._product_connection_count(int(product_id))
+        key = 'recycle' if action == 'RECYCLE' else 'produce'
+        override = None
+        if station_id is not None:
+            override = self._wb_time_overrides.get(int(station_id), {}).get(key)
+        if override is not None:
+            return connections * float(override)
         if action == 'RECYCLE':
             return connections * self._p('wb_recycle_time_sec_per_connection')
         return connections * self._p('wb_produce_time_sec_per_connection')

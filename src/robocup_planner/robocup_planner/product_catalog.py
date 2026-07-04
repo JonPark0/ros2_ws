@@ -72,19 +72,19 @@ PRODUCTS: dict = {
     },
     # --- Workbench-only: contain side-by-side layers ---
     8518: {
-        'name': 'Big Tree',
+        'name': 'Burger',
         'workbench_only': True,
         # Bottom layer: [8], middle: [5, 1] side-by-side, top: [8]
         'layers': [[8], [5, 1], [8]],
     },
     46262: {
-        'name': 'Ice Cream',
+        'name': 'Big Tree',
         'workbench_only': True,
         # Bottom: [4], then [6,2] side-by-side, then [6], top: [2]
         'layers': [[4], [6, 2], [6], [2]],
     },
     48132: {
-        'name': 'Burger',
+        'name': 'Ice Cream',
         'workbench_only': True,
         # Bottom: [4], then [8], then [1,3] side-by-side, top: [2]
         'layers': [[4], [8], [1, 3], [2]],
@@ -103,8 +103,13 @@ def get_material_count(product_id: int) -> Counter:
 
 
 def is_intransit_eligible(product_id: int) -> bool:
-    """True if this product can be assembled in-transit (no side-by-side layers)."""
-    return not PRODUCTS[product_id]['workbench_only']
+    """True if the AMR cargo arm should assemble this product.
+
+    Products not assigned to WB PRODUCE are eligible for AMR cargo-arm
+    assembly.  Multi-layer products can still be flattened for cargo-arm
+    fallback when they are not covered by recycled workbench materials.
+    """
+    return product_id in PRODUCTS
 
 
 def get_base_block(product_id: int) -> int:
@@ -116,10 +121,15 @@ def get_base_block(product_id: int) -> int:
 
 
 def get_build_order(product_id: int) -> List[int]:
-    """Block IDs in assembly order (bottom → top) for in-transit assembly."""
+    """Block IDs in assembly order (bottom → top) for AMR cargo assembly.
+
+    Multi-layer products are flattened layer-by-layer.  If the arm service
+    later supports side-by-side placement metadata, get_all_layers() can be
+    used there without changing planner sequencing.
+    """
     p = PRODUCTS[product_id]
     if p['workbench_only']:
-        raise ValueError(f"Product {product_id} is workbench-only")
+        return [m for layer in p['layers'] for m in layer]
     return list(p['blocks'])
 
 
@@ -129,6 +139,15 @@ def get_all_layers(product_id: int) -> List[List[int]]:
     if not p['workbench_only']:
         return [[b] for b in p['blocks']]
     return [list(layer) for layer in p['layers']]
+
+
+def product_complexity_score(product_id: int) -> int:
+    """Higher score means the product is better suited to workbench arms."""
+    p = PRODUCTS[product_id]
+    material_count = sum(get_material_count(product_id).values())
+    layer_bonus = 100 if p.get('workbench_only') else 0
+    wide_layer_bonus = 10 * sum(1 for layer in p.get('layers', []) if len(layer) > 1)
+    return layer_bonus + wide_layer_bonus + material_count
 
 
 def product_name(product_id: int) -> str:

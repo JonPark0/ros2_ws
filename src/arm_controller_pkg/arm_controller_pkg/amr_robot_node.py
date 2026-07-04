@@ -342,7 +342,7 @@ STAGING_MATERIAL_SLOTS = [2, 3, 4, 5, 6]
 
 # 아이스크림 캡(3+1+2) 조립: 캡 스테이징 슬롯의 layer_index=1 위치에서 2(초록)를 결합
 ICE_CREAM_CAP_LAYER_INDEX = 1
-ICE_CREAM_CAP_Z_OFFSET_MM = 16.0   # z_down = ASSEMBLY_Z_DOWN_MM(70) - 19 = 51mm
+ICE_CREAM_CAP_Z_OFFSET_MM = 17.0   # z_down = ASSEMBLY_Z_DOWN_MM(70) - 19 = 51mm
 
 # UNLOAD 픽업용 슬롯 조인트 (direct move_j, 중간 웨이포인트 없음)
 # 키: slot 번호 (슬롯 2~6)
@@ -436,13 +436,13 @@ ASSEMBLY_SEQUENCE = {
     241:  [2, 4, 1],     # traffic_light: 2x2초록 → 2x2노랑 → 2x2빨강
     462:  [
         {'id': 4, 'layer': 0, 'x':  0.0},
-        {'id': 6, 'layer': 0.9, 'x':  0.0 },
+        {'id': 6, 'layer': 0.7, 'x':  0.0 },
         {'id': 2, 'layer': 1.7, 'x':  0.0},
         ],     # small_tree:    2x2노랑 → 4x2초록 → 2x2초록
     711: [
         {'id': 1, 'layer': 0, 'x':  0.0},
         {'id': 1, 'layer': 1, 'x':  0.0 },
-        {'id': 7, 'layer': 1.7, 'x':  1.1, 'y':  0.5},
+        {'id': 7, 'layer': 1.7, 'x':  0.6, 'y':  0.5    },
     ],     # hammer:        2x2빨강 → 2x2빨강 → 2x2파랑
     4482: [4, 4, 8, 2],  # big_carrot:    2x2노랑 → 2x2노랑 → 4x2노랑 → 2x2초록
     # dict 형식: {'id': 재료id, 'layer': 높이레이어, 'x': Tool X 오프셋(mm)}
@@ -505,6 +505,8 @@ class AmrRobotNode(Node):
             GetTargetPose, '/get_target_pose', callback_group=self.cbg)
         self.gripper_open_client = self.create_client(
             Trigger, '/gripper/open', callback_group=self.cbg)
+        self.gripper_grip100_client = self.create_client(
+            Trigger, '/gripper/grip100', callback_group=self.cbg)
         self.gripper_grip110_client = self.create_client(
             Trigger, '/gripper/grip110', callback_group=self.cbg)
         self.gripper_grip_client = self.create_client(
@@ -2353,8 +2355,26 @@ class AmrRobotNode(Node):
                     'message': f'slot z down failed at enum={enum_idx}',
                 }
 
-            # 6. 그리퍼 grip
-            if not self.call_gripper(True):
+            # # 6. 그리퍼 grip
+            # if not self.call_gripper(True):
+            #     self.get_logger().error(
+            #         f'[AMR] assemble grip failed at slot={slot}')
+            #     self.move_l_rel_checked(
+            #         [0.0, 0.0, UNLOAD_Z_UP_MM, 0.0, 0.0, 0.0],
+            #         label='retreat after grip failure',
+            #     )
+            #     self.return_from_slot(slot, for_unload=True)
+            #     return {
+            #         'success': False,
+            #         'slot': slot,
+            #         'object_id': product_id,
+            #         'message': f'grip failed at enum={enum_idx}',
+            #     }
+            grip_client = None
+            if product_id == 711 and material_id == 7 and enum_idx == 2:
+                grip_client = self.gripper_grip100_client
+
+            if not self.call_gripper(True, client=grip_client):
                 self.get_logger().error(
                     f'[AMR] assemble grip failed at slot={slot}')
                 self.move_l_rel_checked(

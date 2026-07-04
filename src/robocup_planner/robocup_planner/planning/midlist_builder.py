@@ -21,9 +21,7 @@ from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from robocup_planner.planning.distance_calculator import DistanceCalculator
-from robocup_planner.product_catalog import (
-    BATCH_TO_MATERIAL, BATCH_COUNT, MIX_BATCH_ID, get_material_count,
-)
+from robocup_planner.product_catalog import BATCH_TO_MATERIAL, BATCH_COUNT, MIX_BATCH_ID
 
 
 # Each midlist / bidlist entry (one station visit):
@@ -247,52 +245,6 @@ def check_storage_satisfies(
             missing[mat_id] = shortfall
 
     return (len(missing) == 0, missing)
-
-
-def compute_completion_indices(
-    mid: List[Dict],
-    product_ids: List[int],
-) -> Dict[int, int]:
-    """Estimate, for each product_id, how far into the storage pickup
-    sequence its full material set would first be available.
-
-    Flattens the non-recycle pickup_materials across `mid` (already in
-    distance order) into one timeline, then for each product finds the step
-    index of the last unit it needs — as if that product had exclusive claim
-    on the materials it needs. This ignores contention between products
-    competing for the same material type, but that's an acceptable
-    approximation: it's used only to rank which products are likely to
-    complete soonest, not to schedule exact pickups.
-
-    Products whose materials never fully appear in `mid` (e.g. covered
-    entirely by recycling) get an index of len(flat_materials) — treated as
-    "completes last" — so they don't out-rank products with real evidence of
-    an early completion.
-
-    Returns {product_id: step_index}.
-    """
-    flat_materials: List[int] = []
-    for entry in mid:
-        if entry.get('is_recycle_pickup'):
-            continue
-        flat_materials.extend(entry.get('pickup_materials', []))
-
-    positions_by_material: Dict[int, List[int]] = {}
-    for idx, mat_id in enumerate(flat_materials):
-        positions_by_material.setdefault(mat_id, []).append(idx)
-
-    unreachable = len(flat_materials)
-    result: Dict[int, int] = {}
-    for pid in product_ids:
-        last_pos = -1
-        for mat_id, count in get_material_count(pid).items():
-            avail = positions_by_material.get(mat_id, [])
-            if len(avail) < count:
-                last_pos = unreachable
-                break
-            last_pos = max(last_pos, avail[count - 1])
-        result[pid] = max(last_pos, 0)
-    return result
 
 
 def build_mid(

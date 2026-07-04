@@ -65,6 +65,7 @@ from robocup_planner.planning.midlist_builder import (
     check_storage_satisfies,
     merge_into_midlist,
     compute_completion_indices,
+    optimize_route_order,
 )
 from robocup_planner.execution.cargo_state import CargoManager
 from robocup_planner.execution.executor import Executor, Plan
@@ -169,6 +170,18 @@ class PlannerNode(Node):
         # so they clear the produce→deliver→reclaim loop earlier instead of
         # being scheduled purely by num_blocks/weight like every other order.
         self.declare_parameter('deferred_recycle_priority_boost', 1000.0)
+        # The competition workbench can only DISASSEMBLE (RECYCLE). WB PRODUCE
+        # scheduling stays in the code behind this switch for arenas whose
+        # workbench arms can also assemble, but is off by default.
+        self.declare_parameter('wb_produce_enabled', False)
+        # Reorder the storage pickup sequence as an actual route
+        # (nearest-neighbor + 2-opt) instead of a per-station distance sort.
+        self.declare_parameter('route_optimize', True)
+        # Max extra travel (meters, vs. the direct leg) the executor may spend
+        # on one en-route storage stop — picking needed materials or returning
+        # carried surplus — while a workbench RECYCLE runs in the background.
+        # 0 disables en-route service stops.
+        self.declare_parameter('recycle_detour_max_m', 3.0)
 
         wp_path = self.get_parameter('waypoint_yaml').get_parameter_value().string_value
         task_topic = self.get_parameter('task_topic').get_parameter_value().string_value
@@ -228,6 +241,15 @@ class PlannerNode(Node):
         ).get_parameter_value().double_value
         self._deferred_recycle_priority_boost: float = self.get_parameter(
             'deferred_recycle_priority_boost'
+        ).get_parameter_value().double_value
+        self._wb_produce_enabled: bool = self.get_parameter(
+            'wb_produce_enabled'
+        ).get_parameter_value().bool_value
+        self._route_optimize: bool = self.get_parameter(
+            'route_optimize'
+        ).get_parameter_value().bool_value
+        self._recycle_detour_max_m: float = self.get_parameter(
+            'recycle_detour_max_m'
         ).get_parameter_value().double_value
 
         if not wp_path:
@@ -746,6 +768,20 @@ class PlannerNode(Node):
         # Build final mid list
         mid = build_mid(full_midlist, net_aidlist)
 
+        # Reorder the storage visits as an actual route (start at the point
+        # where Phase 2 begins, end anchored at the customer counter where
+        # the assembled products get delivered) instead of the per-station
+        # distance sort build_mid inherited from the midlist.
+        if self._route_optimize and self._calc:
+            route_start = workbench_station_id if needs_recycling else home_id
+            mid = optimize_route_order(
+                mid, self._calc, route_start, customer_station_id
+            )
+            self.get_logger().info(
+                "Route-optimized pickup order: "
+                f"{[e['station_id'] for e in mid if not e.get('is_recycle_pickup')]}"
+            )
+
         # Surplus recycled materials after WB PRODUCE reservations and AMR needs.
         surplus = {}
         for mat, cnt in recycled_after_wb.items():
@@ -832,7 +868,18 @@ class PlannerNode(Node):
         The workbench is preferred when recycled materials already appear on
         the WB shelf after RECYCLE.  Products not fully covered by those
         materials remain in the AMR cargo-arm queue as a fallback.
+
+        When wb_produce_enabled is False (the competition workbench can only
+        disassemble), every produce order goes to the AMR cargo-arm queue and
+        the full recycled-material pool flows into cargo pickups instead.
         """
+        if not self._wb_produce_enabled:
+            self.get_logger().info(
+                "[PLAN] WB PRODUCE disabled (workbench is recycle-only) — "
+                f"all produce orders go to AMR cargo: {list(produce_ids)}"
+            )
+            return [], [int(pid) for pid in produce_ids], Counter(recycled_materials)
+
         pool = Counter(recycled_materials)
         workbench_indices = set()
         ranked = sorted(

@@ -129,12 +129,11 @@ class ManualOrderServer(Node):
         self.task_topic = self.get_parameter("task_topic").get_parameter_value().string_value
         self.side_a_topic = self.get_parameter("side_a_topic").get_parameter_value().string_value
         self.side_b_topic = self.get_parameter("side_b_topic").get_parameter_value().string_value
+        # order_file 파라미터가 비어 있으면 여기서 자동 선택하지 않는다 —
+        # 대화형 실행은 run_cli()의 초기 메뉴(파일 로딩/수동 지정)가 담당하고,
+        # 비대화형(stdin 없음)일 때만 run_cli()가 find_default_order_file()로
+        # fallback 한다.
         self.order_file = self.get_parameter("order_file").get_parameter_value().string_value
-        if not self.order_file:
-            default_order_file = find_default_order_file()
-            if default_order_file:
-                self.order_file = default_order_file
-                self.get_logger().info(f"order_file 자동 선택: {default_order_file}")
 
         self.publisher = self.create_publisher(Task, self.task_topic, TASK_QOS)
         self.side_a_publisher = self.create_publisher(Task, self.side_a_topic, TASK_QOS)
@@ -449,7 +448,12 @@ def print_summary(
     customer_initial_ids: Sequence[int],
 ) -> None:
     selected_raw = sum(len(product_materials(pid)) for pid in list(produce_ids) + list(recycle_ids))
-    need = net_counter(produce_ids, recycle_ids)
+    # planner(planner_node._plan)는 customer 초기 재고가 있는 recycle
+    # (immediate)만 생산 재료 공급원으로 계산한다 — deferred recycle은 생산이
+    # 끝난 뒤에야 분해되므로 그 재료는 plan 시점에 존재하지 않는다. 같은
+    # 기준으로 검사해야 요약의 satisfied/missing이 planner와 일치한다.
+    immediate_recycle_ids = [pid for pid in recycle_ids if pid in customer_initial_ids]
+    need = net_counter(produce_ids, immediate_recycle_ids)
     available = material_availability(material_by_station)
     missing = Counter(
         {mat: cnt - available.get(mat, 0) for mat, cnt in need.items() if cnt > available.get(mat, 0)}
@@ -507,7 +511,7 @@ def print_summary(
 
 
 def run_manual_cli(node: ManualOrderServer) -> None:
-    print(color("=== EAI-WS Manual Order Server ===", CYAN + BOLD))
+    print(color("=== EAI-WS Manual Order (수동 지정) ===", CYAN + BOLD))
     side = prompt_choice("[side]    1) A  2) B", SIDES)
     layout = SIDE_LAYOUT[side]
     selected_workbench_id = layout["workbench_ids"][0]
@@ -784,10 +788,72 @@ def run_yaml_cli(node: ManualOrderServer, order_file: str) -> None:
     node.publish_until_planner_seen(task)
 
 
+def list_order_files() -> List[Path]:
+    """Collect selectable order YAMLs from the default directories.
+
+    Duplicate filenames are deduplicated preferring the source orders/ dir
+    over the installed share copy: colcon does not prune deleted files from
+    install/, and when both exist the source file is the one being edited.
+    """
+    files: List[Path] = []
+    seen_names: set = set()
+    for directory in reversed(default_order_directories()):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml")):
+            if path.name in seen_names:
+                continue
+            seen_names.add(path.name)
+            files.append(path)
+    return sorted(files, key=lambda p: p.name)
+
+
+def prompt_order_file() -> Optional[str]:
+    """List available order files and let the user pick one by number.
+
+    Returns None when no file exists (caller falls back to manual input).
+    """
+    files = list_order_files()
+    if not files:
+        print(color("order 파일(*.yaml/*.yml)을 찾지 못했습니다 — 수동 입력으로 전환합니다.", YELLOW + BOLD))
+        print("확인한 위치:")
+        for directory in default_order_directories():
+            print(f"  - {directory}")
+        return None
+
+    print("")
+    print(color("[Order File]", MAGENTA + BOLD))
+    for index, path in enumerate(files, start=1):
+        print(f"  {index}) {path.name}  ({path.parent})")
+    while True:
+        raw = input("파일 번호 입력: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(files):
+            return str(files[int(raw) - 1])
+        print(f"1~{len(files)} 사이의 번호를 입력하세요.")
+
+
 def run_cli(node: ManualOrderServer) -> None:
     if node.order_file:
+        # order_file 파라미터가 명시되면 메뉴 없이 그대로 실행 (launch 호환).
         run_yaml_cli(node, node.order_file)
         return
+
+    if not sys.stdin.isatty():
+        # 메뉴를 띄울 수 없는 비대화형 실행: 기존 자동 선택 fallback 유지.
+        default_order_file = find_default_order_file()
+        if default_order_file:
+            node.get_logger().info(f"order_file 자동 선택: {default_order_file}")
+            run_yaml_cli(node, default_order_file)
+            return
+        raise EOFError("stdin 없음 + order_file 자동 선택 실패")
+
+    print(color("=== EAI-WS Manual Order Server ===", CYAN + BOLD))
+    mode = prompt_choice("[mode]    주문 입력 방식 선택", ("파일 로딩", "수동 지정"))
+    if mode == "파일 로딩":
+        order_file = prompt_order_file()
+        if order_file:
+            run_yaml_cli(node, order_file)
+            return
     run_manual_cli(node)
 
 

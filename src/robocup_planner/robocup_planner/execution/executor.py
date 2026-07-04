@@ -36,6 +36,17 @@ Two-phase navigation rule:
   through _approach() so this rule can't be silently skipped at a new
   call site.
 
+En-route service rule (interleaving):
+  While a workbench RECYCLE runs asynchronously, the AMR's travel legs
+  (customer→WB with a product on cargo 1, WB→next pickup) may take ONE
+  bounded detour (recycle_detour_max_m of extra travel) to a storage
+  station that either holds still-needed plan materials or is the home
+  station of surplus riding in cargo 2-6. Material collection and surplus
+  return are thus interleaved with disassembly time instead of being
+  strictly phased. Whenever the executor would otherwise idle waiting for
+  a RECYCLE (last Phase-1 product, deferred recycle), it spends that time
+  returning cargo surplus to storage instead.
+
 Deferred recycle rule (lifecycle produce-then-recycle):
   A recycle order whose product_id has no matching stock on the customer
   counter at plan time can't be disassembled up front — the robot must
@@ -253,6 +264,11 @@ class Executor:
             )
             self._soft(self._node.call_post_process(), "call_post_process (customer)")
 
+            # The recycle product rides on cargo 1; slots 2-6 are free, so
+            # this leg may take one bounded detour to pick needed materials
+            # or drop carried surplus on the way to the workbench.
+            self._service_enroute_station(station_id, workbench_id)
+
             self._log(f"  → navigate to workbench {workbench_id} for RECYCLE")
             self._approach(workbench_id)
 
@@ -286,11 +302,25 @@ class Executor:
             is_last = (idx == len(recycle_entries) - 1)
             wait_here = self._should_wait_for_recycle_here(is_last)
             if wait_here:
-                self._log(
-                    f"  → wait beside workbench for RECYCLE {pid} "
-                    "(short backup only, no rotation)"
-                )
-                self._node.call_workbench_clearance_backup()
+                if self._returnable_cargo_surplus_by_station():
+                    # Never idle beside the workbench while carrying
+                    # returnable surplus — spend the disassembly time on the
+                    # return trip and redock when the materials are ready.
+                    self._log(
+                        f"  → overlap RECYCLE {pid} with cargo surplus return "
+                        "instead of idling beside the workbench"
+                    )
+                    self._soft(
+                        self._node.call_post_process(),
+                        "call_post_process (wb surplus overlap)",
+                    )
+                    self._return_cargo_surplus_now()
+                else:
+                    self._log(
+                        f"  → wait beside workbench for RECYCLE {pid} "
+                        "(short backup only, no rotation)"
+                    )
+                    self._node.call_workbench_clearance_backup()
                 self._collect_recycled_materials(
                     pending_wb_handle, pending_wb_pid, workbench_id,
                     clear_shelf=not is_last,
@@ -312,6 +342,21 @@ class Executor:
                     )
                     pending_wb_handle = None
                     pending_wb_pid = None
+                    # When no storage pickup travel remains to overlap the
+                    # RECYCLE with, spend the disassembly window returning
+                    # cargo surplus instead of doing it after everything else.
+                    if (not self._has_storage_pickup_entries()
+                            and self._returnable_cargo_surplus_by_station()):
+                        self._log(
+                            "  → overlap last RECYCLE with cargo surplus return"
+                        )
+                        self._return_cargo_surplus_now()
+                else:
+                    # RECYCLE runs while we head to the next pickup — spend
+                    # the disassembly window on one bounded en-route stop.
+                    self._service_enroute_station(
+                        workbench_id, recycle_entries[idx + 1]['station_id']
+                    )
 
             # Cargo pressure check: with several recycle products in flight,
             # cargo 2-6 can fill up with reclaimed material before it's all
@@ -335,7 +380,7 @@ class Executor:
 
     def _has_main_production_work_remaining(self) -> bool:
         """True when the AMR still has useful work to overlap with WB RECYCLE."""
-        if any(not e.get('is_recycle_pickup') for e in self._plan.mid):
+        if self._has_storage_pickup_entries():
             return True
         if self._remaining_material_need():
             return True
@@ -539,9 +584,9 @@ class Executor:
             self._start_ready_intransit_assembly()
         self._log_ledger('clear-wb-shelf')
 
-    def _return_cargo_surplus_now(self) -> None:
-        """Return cargo materials not needed by remaining production to their
-        home storage stations immediately (mid-mission pressure relief)."""
+    def _returnable_cargo_surplus_by_station(self) -> Dict[int, List[int]]:
+        """Cargo 2-6 materials not needed by remaining production, grouped by
+        their home storage station. Materials with no known home are omitted."""
         protected = self._remaining_product_material_need()
         by_station: Dict[int, List[int]] = {}
         for _, mat_id in self._node.cargo_materials_snapshot():
@@ -553,11 +598,93 @@ class Executor:
             if destination is None:
                 continue
             by_station.setdefault(destination, []).append(mat_id)
+        return by_station
 
+    def _return_cargo_surplus_now(self) -> None:
+        """Return cargo materials not needed by remaining production to their
+        home storage stations immediately (mid-mission pressure relief)."""
+        by_station = self._returnable_cargo_surplus_by_station()
         if not by_station:
             self._log("  ! no returnable cargo surplus — cargo holds only needed materials")
             return
         self._return_grouped_materials(by_station, 'mid-mission-surplus-return')
+
+    def _pending_storage_entries(self) -> List[Dict]:
+        """Storage entries of the plan that still have materials to pick."""
+        return [
+            e for e in self._plan.mid
+            if not e.get('is_recycle_pickup') and e.get('pickup_materials')
+        ]
+
+    def _service_enroute_station(self, cur_id: int, next_id: int) -> bool:
+        """Serve at most one storage station lying near the cur→next leg.
+
+        While a workbench RECYCLE runs in the background, the travel leg can
+        absorb a bounded detour (recycle_detour_max_m of extra distance vs.
+        the direct leg) to a station that either still holds plan materials
+        to pick or is the home station of surplus riding in cargo 2-6 — this
+        is what interleaves material collection and surplus return with
+        disassembly time. Materials that don't fit cargo stay in their plan
+        entry, so the pickup phase revisits them later. Returns True when a
+        detour stop was actually made.
+        """
+        calc = getattr(self._node, '_calc', None)
+        max_detour = float(getattr(self._node, '_recycle_detour_max_m', 0.0))
+        if calc is None or max_detour <= 0.0:
+            return False
+
+        pickup_by_sid: Dict[int, List[Dict]] = {}
+        for e in self._pending_storage_entries():
+            pickup_by_sid.setdefault(int(e['station_id']), []).append(e)
+        surplus_by_sid = self._returnable_cargo_surplus_by_station()
+
+        candidates = (set(pickup_by_sid) | set(surplus_by_sid))
+        candidates.discard(int(cur_id))
+        candidates.discard(int(next_id))
+        if not candidates:
+            return False
+
+        direct = calc.station_to_station(int(cur_id), int(next_id))
+        best_sid = None
+        best_cost = max_detour
+        for sid in candidates:
+            cost = (
+                calc.station_to_station(int(cur_id), sid)
+                + calc.station_to_station(sid, int(next_id))
+                - direct
+            )
+            if cost <= best_cost:
+                best_sid = sid
+                best_cost = cost
+        if best_sid is None:
+            return False
+
+        self._log(
+            f"  → en-route service stop at station {best_sid} "
+            f"(detour +{best_cost:.2f} m on leg {cur_id}→{next_id})"
+        )
+        self._approach(best_sid)
+        self._return_matching_surplus_at_station(best_sid)
+        for entry in pickup_by_sid.get(best_sid, []):
+            remaining: List[int] = []
+            for mat_id in _tall_blocks_first(entry.get('pickup_materials', [])):
+                if not self._node.cargo_has_space_for(mat_id):
+                    if not self._try_free_cargo_space(mat_id):
+                        remaining.append(mat_id)
+                        continue
+                self._log(f"    ← en-route pick mat {mat_id}")
+                self._require(
+                    self._node.arm_pick_material(
+                        station_id=best_sid, material_id=mat_id
+                    ),
+                    f"arm_pick_material(station={best_sid}, material={mat_id}) (en-route)",
+                )
+                self._ledger.remove(best_sid, mat_id)
+                self._start_ready_intransit_assembly()
+            entry['pickup_materials'] = remaining
+        self._start_ready_intransit_assembly()
+        self._soft(self._node.call_post_process(), "call_post_process (en-route service)")
+        return True
 
     # ------------------------------------------------------------------
     # Workbench PRODUCE from recycled materials
@@ -920,8 +1047,31 @@ class Executor:
         self._return_grouped_materials(by_station, 'return-surplus-storage')
 
     def _return_grouped_materials(self, by_station: Dict[int, List[int]], label: str) -> None:
-        """Drive to each destination station once and return the given materials."""
-        for station_id, mat_ids in by_station.items():
+        """Drive to each destination station once and return the given materials.
+
+        Stations are visited nearest-first from the AMR's current position
+        (dict insertion order carries no route meaning) so multi-station
+        return trips don't zig-zag across the arena.
+        """
+        order = list(by_station.keys())
+        calc = getattr(self._node, '_calc', None)
+        cur = self._node.get_current_station_id()
+        if calc is not None and cur is not None and len(order) > 1:
+            sequenced: List[int] = []
+            remaining = list(order)
+            ref = int(cur)
+            while remaining:
+                nxt = min(
+                    remaining,
+                    key=lambda sid: calc.station_to_station(ref, int(sid)),
+                )
+                sequenced.append(nxt)
+                remaining.remove(nxt)
+                ref = int(nxt)
+            order = sequenced
+
+        for station_id in order:
+            mat_ids = by_station[station_id]
             self._log(f"  → navigate to storage {station_id} to return {mat_ids}")
             self._approach(station_id)
             for mat_id in mat_ids:
@@ -978,6 +1128,11 @@ class Executor:
 
         for idx, entry in enumerate(storage_entries):
             sid = entry['station_id']
+            if not entry.get('pickup_materials'):
+                # Entry fully serviced by an en-route stop during the
+                # recycle phase — nothing left to collect here.
+                self._log(f"[{idx}] storage station {sid} already serviced en route — skip")
+                continue
             self._log(
                 f"[{idx}/{len(storage_entries)-1}] navigate to storage station {sid}"
             )
@@ -1289,6 +1444,11 @@ class Executor:
             )
             self._soft(self._node.call_post_process(), "call_post_process (deferred pickup)")
 
+            # The reclaimed product rides on cargo 1; the previous product's
+            # blocks may still ride in cargo 2-6 — drop them at a home
+            # station lying on the way to the workbench when cheap.
+            self._service_enroute_station(customer_id, workbench_id)
+
             self._log(f"  → navigate to workbench {workbench_id} for RECYCLE")
             self._approach(workbench_id)
             # The shelf must be empty before the product is placed on it:
@@ -1303,37 +1463,80 @@ class Executor:
                 f"arm_unload_product_to_workbench(product={pid}, station={workbench_id})",
             )
             handle = self._node.wb_task_async('RECYCLE', pid)
-            # Nothing else to fetch while this disassembles (deferred recycle
-            # runs one product at a time) — retreat to the sub_goal to wait
-            # instead of idling docked at the goal.
-            self._require(
-                self._node.navigate_subgoal(workbench_id),
-                f"navigate_subgoal({workbench_id})",
-            )
-            if not self._node.wait_for_wb_task(handle):
-                raise ExecutionFailure(f"Deferred RECYCLE failed: product={pid}")
-            self._require(
-                self._node.navigate_goal(workbench_id),
-                f"navigate_goal({workbench_id})",
-            )
-            for mat_id, cnt in get_material_count(pid).items():
-                for _ in range(cnt):
-                    self._log(f"    ← pick recycled mat {mat_id} from workbench")
-                    self._require(
-                        self._node.arm_pick_material(
-                            station_id=workbench_id, material_id=mat_id,
-                        ),
-                        f"arm_pick_material(station={workbench_id}, material={mat_id})",
-                    )
-            self._soft(self._node.call_post_process(), "call_post_process (deferred recycle)")
-
-            by_station: Dict[int, List[int]] = {}
-            for mat_id, cnt in get_material_count(pid).items():
-                station_id = self._plan.material_home_station.get(
-                    mat_id, workbench_id
+            # Spend the disassembly time returning carried materials (the
+            # previous product's blocks) to storage; only when cargo has
+            # nothing to return, retreat to the sub_goal and wait there.
+            if self._returnable_cargo_surplus_by_station():
+                self._log(
+                    f"  → overlap deferred RECYCLE {pid} with cargo material return"
                 )
-                by_station.setdefault(station_id, []).extend([mat_id] * cnt)
-            self._return_grouped_materials(by_station, f'deferred-recycle-return-{pid}')
+                self._soft(
+                    self._node.call_post_process(),
+                    "call_post_process (deferred wb exit)",
+                )
+                self._return_cargo_surplus_now()
+                if not self._node.wait_for_wb_task(handle):
+                    raise ExecutionFailure(f"Deferred RECYCLE failed: product={pid}")
+                self._ensure_docked_at_station(
+                    workbench_id, "collect deferred RECYCLE output"
+                )
+            else:
+                self._require(
+                    self._node.navigate_subgoal(workbench_id),
+                    f"navigate_subgoal({workbench_id})",
+                )
+                if not self._node.wait_for_wb_task(handle):
+                    raise ExecutionFailure(f"Deferred RECYCLE failed: product={pid}")
+                self._require(
+                    self._node.navigate_goal(workbench_id),
+                    f"navigate_goal({workbench_id})",
+                )
+
+            reclaim = [
+                m for m, c in get_material_count(pid).items() for _ in range(c)
+            ]
+            for mat_id in _tall_blocks_first(reclaim):
+                if not self._node.cargo_has_space_for(mat_id):
+                    if not self._try_free_cargo_space(mat_id):
+                        self._log(
+                            f"  ! no cargo space to reclaim mat {mat_id} — "
+                            "returning carried materials first"
+                        )
+                        self._soft(
+                            self._node.call_post_process(),
+                            "call_post_process (deferred space relief)",
+                        )
+                        self._return_cargo_surplus_now()
+                        self._ensure_docked_at_station(
+                            workbench_id, "resume deferred RECYCLE collection"
+                        )
+                        if not self._node.cargo_has_space_for(mat_id):
+                            raise ExecutionFailure(
+                                f"No cargo space to reclaim material {mat_id} "
+                                f"from workbench {workbench_id}"
+                            )
+                self._log(f"    ← pick recycled mat {mat_id} from workbench")
+                self._require(
+                    self._node.arm_pick_material(
+                        station_id=workbench_id, material_id=mat_id,
+                    ),
+                    f"arm_pick_material(station={workbench_id}, material={mat_id})",
+                )
+            self._soft(self._node.call_post_process(), "call_post_process (deferred recycle)")
+            # The reclaimed blocks deliberately stay in cargo: the next
+            # product's RECYCLE window (or the final sweep below) returns
+            # them, so return travel overlaps disassembly time instead of
+            # adding a dedicated leg per product.
+
+        # Final sweep — everything reclaimed by the last product (plus any
+        # blocks earlier overlap trips could not place) is still in cargo.
+        by_station: Dict[int, List[int]] = {}
+        for _, mat_id in self._node.cargo_materials_snapshot():
+            mat_id = int(mat_id)
+            station_id = self._plan.material_home_station.get(mat_id, workbench_id)
+            by_station.setdefault(station_id, []).append(mat_id)
+        if by_station:
+            self._return_grouped_materials(by_station, 'deferred-recycle-return')
 
     # ------------------------------------------------------------------
     # Return to home

@@ -295,6 +295,66 @@ def compute_completion_indices(
     return result
 
 
+def optimize_route_order(
+    mid: List[Dict],
+    calc: DistanceCalculator,
+    start_station_id: int,
+    end_station_id: Optional[int] = None,
+) -> List[Dict]:
+    """Reorder the storage entries of `mid` as a short open route.
+
+    The distance-sorted midlist ranks every station from one reference point
+    (workbench or home), which is not a route: two far-but-adjacent stations
+    end up separated by a return trip to the near side. This rebuilds the
+    storage visit order as start → s1 → … → sn (→ end) with nearest-neighbor
+    construction plus 2-opt improvement, minimising actual travel instead of
+    per-station radius. Recycle-pickup entries keep their position at the
+    front (Phase 1 ordering is owned by the recycle loop, not this function).
+
+    end_station_id anchors the route toward where the AMR goes next (the
+    customer counter for delivery); pass None to leave the tail free.
+
+    Material-to-station assignment (pickup_materials) is preserved — only
+    the visiting order changes.
+    """
+    phase1 = [e for e in mid if e.get('is_recycle_pickup')]
+    storage = [e for e in mid if not e.get('is_recycle_pickup')]
+    if len(storage) < 2:
+        return mid
+
+    def d(a: int, b: int) -> float:
+        return calc.station_to_station(int(a), int(b))
+
+    # Nearest-neighbor construction
+    remaining = list(storage)
+    route: List[Dict] = []
+    cur = int(start_station_id)
+    while remaining:
+        nxt = min(remaining, key=lambda e: d(cur, e['station_id']))
+        route.append(nxt)
+        remaining.remove(nxt)
+        cur = int(nxt['station_id'])
+
+    def route_cost(rt: List[Dict]) -> float:
+        ids = [int(start_station_id)] + [int(e['station_id']) for e in rt]
+        if end_station_id is not None:
+            ids.append(int(end_station_id))
+        return sum(d(ids[i], ids[i + 1]) for i in range(len(ids) - 1))
+
+    # 2-opt improvement (station counts are tiny, so this is cheap)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(len(route) - 1):
+            for j in range(i + 1, len(route)):
+                candidate = route[:i] + route[i:j + 1][::-1] + route[j + 1:]
+                if route_cost(candidate) + 1e-9 < route_cost(route):
+                    route = candidate
+                    improved = True
+
+    return phase1 + route
+
+
 def build_mid(
     midlist: List[Dict],
     net_aidlist: Counter,

@@ -11,9 +11,12 @@ from collections import Counter
 from pathlib import Path
 import sys
 import threading
-from typing import Dict, List, Sequence
+import time
+from typing import Dict, List, Optional, Sequence
 
 import yaml
+
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -50,6 +53,43 @@ TASK_QOS = QoSProfile(
 )
 
 
+def default_order_directories() -> List[Path]:
+    """Candidate directories to look for a default order_file in.
+
+    Checked in order: the installed package share directory (works for any
+    `ros2 run` regardless of cwd), then the orders/ directory next to this
+    package's source (works for --symlink-install / running from source).
+    """
+    directories: List[Path] = []
+    try:
+        directories.append(Path(get_package_share_directory("eai_task_server")) / "orders")
+    except PackageNotFoundError:
+        pass
+    directories.append(Path(__file__).resolve().parent.parent / "orders")
+    return directories
+
+
+def find_default_order_file() -> Optional[str]:
+    """Auto-pick order_file when exactly one *.yaml/*.yml exists in a default dir."""
+    for directory in default_order_directories():
+        if not directory.is_dir():
+            continue
+        order_files = sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml"))
+        if len(order_files) == 1:
+            return str(order_files[0])
+        if len(order_files) > 1:
+            print(
+                color(
+                    f"[order_file] {directory}에 order 파일이 여러 개 있어 자동 선택할 수 없습니다: "
+                    f"{[f.name for f in order_files]}",
+                    YELLOW + BOLD,
+                )
+            )
+            print(color("order_file 파라미터로 사용할 파일을 지정하세요.", YELLOW + BOLD))
+            return None
+    return None
+
+
 class ManualOrderServer(Node):
     def __init__(self) -> None:
         super().__init__("manual_order_server")
@@ -62,6 +102,11 @@ class ManualOrderServer(Node):
         self.side_a_topic = self.get_parameter("side_a_topic").get_parameter_value().string_value
         self.side_b_topic = self.get_parameter("side_b_topic").get_parameter_value().string_value
         self.order_file = self.get_parameter("order_file").get_parameter_value().string_value
+        if not self.order_file:
+            default_order_file = find_default_order_file()
+            if default_order_file:
+                self.order_file = default_order_file
+                self.get_logger().info(f"order_file 자동 선택: {default_order_file}")
 
         self.publisher = self.create_publisher(Task, self.task_topic, TASK_QOS)
         self.side_a_publisher = self.create_publisher(Task, self.side_a_topic, TASK_QOS)
@@ -80,6 +125,14 @@ class ManualOrderServer(Node):
         self.side_b_publisher.publish(side_b_task)
 
     def publish_task(self, task: Task) -> None:
+        """Publish once and return immediately.
+
+        A single immediate publish races the DDS discovery handshake: if this
+        node exits before the planner's subscription match completes, the
+        TRANSIENT_LOCAL history goes away with it and the planner never sees
+        the task. Prefer publish_until_planner_seen() for anything that isn't
+        kept alive by other means.
+        """
         self.publish_task_once(task)
         side_a_task = build_side_only_task(task, "side_a")
         side_b_task = build_side_only_task(task, "side_b")
@@ -96,6 +149,48 @@ class ManualOrderServer(Node):
             f"side_b published: orders={len(side_b_task.order_list)}, "
             f"stations={len(side_b_task.arena_layout)}"
         )
+
+    def publish_until_planner_seen(
+        self,
+        task: Task,
+        period_sec: float = 1.0,
+        post_subscriber_publishes: int = 3,
+        timeout_sec: float = 30.0,
+    ) -> None:
+        """Publish repeatedly until a /eai/task subscriber is confirmed.
+
+        publish_task() alone is not reliable here: the manual/YAML flows
+        publish once and then main() tears the node down right away, so if
+        the planner's discovery match hasn't completed yet the message never
+        reaches it even under TRANSIENT_LOCAL. Keep republishing (harmless —
+        same content) until a subscriber has been observed for a few
+        consecutive sends, or until timeout_sec elapses.
+        """
+        count = 0
+        observed = 0
+        deadline = time.monotonic() + timeout_sec
+        self.get_logger().info(
+            f"publishing task on {self.task_topic} until a planner subscriber is observed"
+        )
+        while rclpy.ok():
+            count += 1
+            self.publish_task_once(task)
+            subscribers = self.publisher.get_subscription_count()
+            observed = observed + 1 if subscribers > 0 else 0
+            self.get_logger().info(
+                f"publish #{count}: /eai/task subscribers={subscribers}, "
+                f"confirmed_sends={observed}/{post_subscriber_publishes}"
+            )
+            if observed >= post_subscriber_publishes:
+                self.get_logger().info("task published after planner subscriber was observed")
+                return
+            if time.monotonic() >= deadline:
+                self.get_logger().warn(
+                    "no planner subscriber observed before timeout; "
+                    "task may not have been delivered"
+                )
+                return
+            time.sleep(max(period_sec, 0.1))
 
 
 def parse_int_list(raw: str) -> List[int]:
@@ -423,7 +518,7 @@ def run_manual_cli(node: ManualOrderServer) -> None:
         customer_initial_ids,
     )
     input(color("Enter를 누르면 /eai/task 와 side별 topic으로 발행합니다.", GREEN + BOLD))
-    node.publish_task(task)
+    node.publish_until_planner_seen(task)
 
 
 def load_order_config(order_file: str) -> Dict:
@@ -518,7 +613,7 @@ def run_yaml_cli(node: ManualOrderServer, order_file: str) -> None:
         selected_customer_id,
         customer_initial_ids,
     )
-    node.publish_task(task)
+    node.publish_until_planner_seen(task)
 
 
 def run_cli(node: ManualOrderServer) -> None:

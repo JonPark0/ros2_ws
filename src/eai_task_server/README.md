@@ -90,7 +90,13 @@ ros2 launch eai_task_server task_server_with_listener.launch.py scenario:=produc
 ## Manual Order Server
 
 `manual_order_server` builds one task by hand (side, produce/recycle product IDs,
-storage material_ids) and publishes it once to `/eai/task` and the per-side topics.
+storage material_ids) and publishes it to `/eai/task` and the per-side topics.
+
+After you confirm, it keeps republishing (same content, harmless) until it has
+observed a `/eai/task` subscriber (e.g. `planner_node`) for a few consecutive
+sends, then exits. This avoids losing the task to a DDS discovery race where
+the node would otherwise publish once and tear down before the planner's
+subscription match completes.
 
 ```bash
 ros2 run eai_task_server manual_order_server

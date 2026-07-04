@@ -152,6 +152,11 @@ class PlannerNode(Node):
         # retries before the call is treated as a hard failure.
         self.declare_parameter('nav_timeout_sec', 60.0)
         self.declare_parameter('arm_timeout_sec', 30.0)
+        # ASSEMBLE builds a whole product (up to 5 blocks, side-by-side
+        # placement included) in one service call — the 2026-07-04 field run
+        # measured 30.4s for the 4-block Burger, so it must not share the
+        # short arm_timeout_sec meant for single LOAD/UNLOAD moves.
+        self.declare_parameter('assemble_timeout_sec', 180.0)
         self.declare_parameter('wb_timeout_sec', 120.0)
         self.declare_parameter('call_max_retries', 2)
         # Grace period to let a timed-out nav goal's cancellation actually land
@@ -213,6 +218,9 @@ class PlannerNode(Node):
 
         self._nav_timeout_sec: float = self.get_parameter('nav_timeout_sec').get_parameter_value().double_value
         self._arm_timeout_sec: float = self.get_parameter('arm_timeout_sec').get_parameter_value().double_value
+        self._assemble_timeout_sec: float = self.get_parameter(
+            'assemble_timeout_sec'
+        ).get_parameter_value().double_value
         self._wb_timeout_sec: float = self.get_parameter('wb_timeout_sec').get_parameter_value().double_value
         self._call_max_retries: int = self.get_parameter('call_max_retries').get_parameter_value().integer_value
         self._nav_cancel_grace_sec: float = self.get_parameter(
@@ -933,15 +941,11 @@ class PlannerNode(Node):
 
     def arm_unload_all_materials(self) -> bool:
         """Unload every material in cargo 2-6 to the current workbench (overflow buffer)."""
+        success = True
         with self._cargo_lock:
             all_mats = self._cargo.all_materials()
-        success = True
-        for cargo_id, mat_id in all_mats:
-            ok = self.arm_unload_material(mat_id)
-            if ok:
-                with self._cargo_lock:
-                    self._cargo.remove_material(cargo_id, mat_id)
-            success = success and ok
+        for _, mat_id in all_mats:
+            success = self.arm_unload_material(mat_id) and success
         return success
 
     # ------------------------------------------------------------------
@@ -1145,6 +1149,12 @@ class PlannerNode(Node):
                     object_ids=[product_id],
                     location=cargo_id,
                     station_id=cargo_id,
+                    # Whole-product build: 30s+ measured in the field for a
+                    # 4-block product. No retry — the arm is busy executing
+                    # this very command, so a retry can only get 'busy' or
+                    # double-assemble after completion.
+                    timeout_sec=self._assemble_timeout_sec,
+                    max_retries=0,
                 )
                 handle.success = success
                 if success:
@@ -1307,18 +1317,30 @@ class PlannerNode(Node):
         object_ids: list,
         location: int = 0,
         station_id: int = None,
+        timeout_sec: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> bool:
         """Send one ArmCommand service call to the arm. Bounded by
-        arm_timeout_sec; retries up to call_max_retries times before
-        giving up and returning False, so an unresponsive arm server can
-        never hang the executor thread forever."""
+        timeout_sec (default arm_timeout_sec); retries up to max_retries
+        (default call_max_retries) times before giving up and returning
+        False, so an unresponsive arm server can never hang the executor
+        thread forever.
+
+        Long-running commands (ASSEMBLE) must pass their own timeout_sec and
+        max_retries=0: the arm is a single resource, so a retry sent while
+        the original command is still executing only gets 'busy' back, and a
+        blind re-send after it finishes would double-execute it.
+        """
+        timeout_sec = self._arm_timeout_sec if timeout_sec is None else float(timeout_sec)
+        max_retries = self._call_max_retries if max_retries is None else int(max_retries)
+
         req = ArmCommand.Request()
         req.action = action
         req.object_ids = [int(x) for x in object_ids]
         req.location = int(location)
         req.station_id = int(station_id if station_id is not None else location)
 
-        for attempt in range(1, self._call_max_retries + 2):
+        for attempt in range(1, max_retries + 2):
             with self._arm_call_lock:
                 self._arm_client.wait_for_service()
                 future = self._arm_client.call_async(req)
@@ -1329,9 +1351,9 @@ class PlannerNode(Node):
 
                 future.add_done_callback(_cb)
                 completed = self._bounded_wait(
-                    done, self._arm_timeout_sec,
+                    done, timeout_sec,
                     f"arm_call({action}, ids={req.object_ids}) "
-                    f"attempt {attempt}/{self._call_max_retries + 1}",
+                    f"attempt {attempt}/{max_retries + 1}",
                 )
 
             if completed:
@@ -1344,21 +1366,21 @@ class PlannerNode(Node):
                 if resp is not None and resp.success:
                     return True
 
-                if resp is not None and attempt <= self._call_max_retries:
+                if resp is not None and attempt <= max_retries:
                     self.get_logger().warning(
                         f"[RETRY] arm_call({action}) attempt {attempt} reported "
                         f"failure ({resp.message}) — retrying"
                     )
                     continue
 
-            if attempt <= self._call_max_retries:
+            if attempt <= max_retries:
                 self.get_logger().warning(
                     f"[RETRY] arm_call({action}) attempt {attempt} timed out — retrying"
                 )
 
         self.get_logger().error(
             f"[ARM] {action} (ids={req.object_ids}) failed after "
-            f"{self._call_max_retries + 1} attempt(s)"
+            f"{max_retries + 1} attempt(s)"
         )
         return False
 
@@ -1433,12 +1455,20 @@ class PlannerNode(Node):
 
     def arm_unload_material(self, object_id: int) -> bool:
         """Unload a material block from cargo to the workbench.
-        The arm locates the block via cargo_manager FIND_OBJECT."""
-        return self._arm_call(
+        The arm locates the block via cargo_manager FIND_OBJECT.
+        Removes the block from the planner-side cargo tracking on success."""
+        success = self._arm_call(
             ARM_PLACE,
             object_ids=[object_id],
             location=0,
         )
+        if success:
+            with self._cargo_lock:
+                for cargo_id, mat_id in self._cargo.all_materials():
+                    if mat_id == object_id:
+                        self._cargo.remove_material(cargo_id, mat_id)
+                        break
+        return success
 
     def arm_return_material_to_storage(self, material_id: int, station_id: int) -> bool:
         """Return a surplus recycled material block from cargo to its designated

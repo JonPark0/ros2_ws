@@ -60,7 +60,7 @@ not finished yet.
 
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from robocup_planner.planning.cargo_allocator import CargoAllocator
 from robocup_planner.product_catalog import get_material_count
@@ -89,6 +89,18 @@ class Plan:
 
 class ExecutionFailure(RuntimeError):
     """Raised when a required runtime action fails and the plan cannot continue."""
+
+
+def _tall_blocks_first(material_ids: Iterable[int]) -> List[int]:
+    """Order picks so 4x2 blocks (IDs 5-8, 4 units tall) load before 2x2s.
+
+    Cargo slots are 6 units tall. 2x2 blocks loaded first pair up into
+    slots leaving 2-unit gaps a 4x2 can never use; loading the tall blocks
+    while slots are still empty avoids that fragmentation (this exact
+    pattern forced an avoidable workbench overflow detour in simulation of
+    the 2026-07-04 field mission).
+    """
+    return sorted((int(m) for m in material_ids), key=lambda m: (m < 5, m))
 
 
 class Executor:
@@ -183,6 +195,11 @@ class Executor:
         self._collect_ready_recycle_outputs(
             block=True, only_if_useful_for_produce=True
         )
+        # Last chance for queued WB PRODUCE whose set was split between the
+        # shelf and cargo by clear-shelf collection.
+        if self._workbench_queue:
+            self._feed_workbench_production_from_cargo(self._plan.workbench_station_id)
+            self._start_ready_workbench_production()
         self._collect_ready_workbench_products(block=True)
         self._deliver_until_idle()
 
@@ -239,14 +256,20 @@ class Executor:
             self._log(f"  → navigate to workbench {workbench_id} for RECYCLE")
             self._approach(workbench_id)
 
-            # Clear out the previous product's disassembled materials first so
-            # the workbench shelf is free before we place the next product on it.
+            # Clear out the previous product's disassembled materials first —
+            # the workbench shelf MUST be completely empty before the next
+            # product is placed on it (hard physical invariant).
             if pending_wb_handle is not None:
                 self._collect_recycled_materials(
-                    pending_wb_handle, pending_wb_pid, workbench_id
+                    pending_wb_handle, pending_wb_pid, workbench_id,
+                    clear_shelf=True,
                 )
                 pending_wb_handle = None
                 pending_wb_pid = None
+
+            # Defensive: whatever path led here, never place a product on a
+            # shelf that still has loose materials on it.
+            self._pick_all_workbench_materials(workbench_id)
 
             self._require(
                 self._node.arm_unload_product_to_workbench(
@@ -269,7 +292,8 @@ class Executor:
                 )
                 self._node.call_workbench_clearance_backup()
                 self._collect_recycled_materials(
-                    pending_wb_handle, pending_wb_pid, workbench_id
+                    pending_wb_handle, pending_wb_pid, workbench_id,
+                    clear_shelf=not is_last,
                 )
                 pending_wb_handle = None
                 pending_wb_pid = None
@@ -291,26 +315,16 @@ class Executor:
 
             # Cargo pressure check: with several recycle products in flight,
             # cargo 2-6 can fill up with reclaimed material before it's all
-            # needed. Drop the load here (we're already at the workbench)
-            # rather than risking an overflow trip mid-route to the next pickup.
+            # needed. Dropping it on the WB shelf is NOT an option here —
+            # the shelf must be empty before the next product is placed on
+            # it, so a drop would have to be re-picked immediately. Instead
+            # return cargo surplus to its home storage stations now.
             if not is_last and self._node.cargo_is_full():
                 self._log(
                     "  ! cargo full during recycle phase — "
-                    "dropping materials at workbench before next pickup"
+                    "returning cargo surplus to storage before next pickup"
                 )
-                self._ensure_docked_at_station(
-                    workbench_id, "drop recycled overflow materials"
-                )
-                dropped = self._node.cargo_materials_snapshot()
-                self._require(
-                    self._node.arm_unload_all_materials(),
-                    "arm_unload_all_materials (recycle overflow)",
-                )
-                for _, mat_id in dropped:
-                    self._ledger.add(workbench_id, mat_id)
-                self._log_ledger('recycle-overflow-drop')
-                self._start_ready_workbench_production()
-                self._soft(self._node.call_post_process(), "call_post_process (overflow)")
+                self._return_cargo_surplus_now()
 
         # Collect whatever disassembly is still pending after the last pickup.
         if pending_wb_handle is not None:
@@ -390,10 +404,18 @@ class Executor:
                 self._start_ready_intransit_assembly()
 
     def _collect_recycled_materials(
-        self, handle, pid: int, workbench_id: int
+        self, handle, pid: int, workbench_id: int, clear_shelf: bool = False
     ) -> None:
         """Wait for a RECYCLE WbTask to finish, then pick up every material
-        block it produced from the workbench shelf."""
+        block it produced from the workbench shelf.
+
+        clear_shelf=True enforces the hard physical invariant that the WB
+        shelf must be COMPLETELY empty of loose materials before the next
+        product is placed on it — every remaining shelf material (needed or
+        surplus) is collected unconditionally. With clear_shelf=False
+        (nothing will be placed on the shelf next), surplus may stay
+        buffered on the shelf to keep cargo 2-6 free for production.
+        """
         if not self._node.wait_for_wb_task(handle):
             raise ExecutionFailure(f"RECYCLE failed: product={pid}")
 
@@ -403,10 +425,139 @@ class Executor:
         self._log_ledger(f"recycle-output-product-{pid}")
 
         # Let WB arms consume recycled materials for assigned PRODUCE first.
+        # Top up the shelf from cargo when that completes a queued product —
+        # clear-shelf collection may have carried part of its set away.
+        self._feed_workbench_production_from_cargo(workbench_id)
         self._start_ready_workbench_production()
         self._pick_needed_workbench_materials_for_amr(workbench_id)
-        self._pick_surplus_workbench_materials_for_return(workbench_id)
+        if clear_shelf:
+            self._pick_all_workbench_materials(workbench_id)
+        else:
+            self._pick_surplus_workbench_materials_for_return(workbench_id)
         self._collect_ready_workbench_products(block=False)
+
+    def _feed_workbench_production_from_cargo(self, workbench_id: int) -> None:
+        """Hand cargo materials back to the WB shelf when that completes a
+        queued WB PRODUCE set.
+
+        The clear-shelf rule (shelf must be empty before a product is placed
+        on it) can carry away materials a queued WB product was waiting for
+        while its set arrives across multiple disassemblies. Once the rest
+        of the set reaches the shelf, the missing blocks are sitting in
+        cargo — without this hand-back the product would be starved forever.
+        Only cargo blocks not needed by the AMR's own unassembled products
+        are given away.
+        """
+        if not self._workbench_queue:
+            return
+
+        cargo_counts = Counter(
+            mat_id for _, mat_id in self._node.cargo_materials_snapshot()
+        )
+        amr_need = self._remaining_product_material_need()
+        spare = Counter(
+            {m: c - amr_need.get(m, 0) for m, c in cargo_counts.items() if c > amr_need.get(m, 0)}
+        )
+
+        for product_id in list(self._workbench_queue):
+            shelf = Counter(self._ledger.snapshot().get(workbench_id, {}))
+            need = get_material_count(product_id)
+            missing = Counter(
+                {m: c - shelf.get(m, 0) for m, c in need.items() if c > shelf.get(m, 0)}
+            )
+            if not missing:
+                continue  # _start_ready_workbench_production() will take it
+            if any(spare.get(m, 0) < c for m, c in missing.items()):
+                continue  # cargo can't complete this set without starving AMR work
+            self._ensure_docked_at_station(
+                workbench_id, f"feed WB PRODUCE {product_id} from cargo"
+            )
+            self._log(
+                f"  → hand back {dict(missing)} from cargo to complete "
+                f"WB PRODUCE {product_id}"
+            )
+            for mat_id, cnt in sorted(missing.items()):
+                for _ in range(cnt):
+                    self._require(
+                        self._node.arm_unload_material(mat_id),
+                        f"arm_unload_material({mat_id}) (feed WB PRODUCE {product_id})",
+                    )
+                    self._ledger.add(workbench_id, mat_id)
+                    spare[mat_id] -= 1
+        self._log_ledger('feed-wb-produce')
+
+    def _pick_all_workbench_materials(self, workbench_id: int) -> None:
+        """Unconditionally collect every loose material from the WB shelf.
+
+        Called right before a product is placed on the workbench: leaving
+        even one block there means the product lands on a pile. Frees cargo
+        space by assembling first, then by returning cargo surplus to its
+        home stations (and re-docking); if the shelf still cannot be
+        cleared, fail loudly rather than cause a physical collision.
+        """
+        buffered = self._ledger.snapshot().get(workbench_id, {})
+        if not buffered:
+            return
+
+        to_pick: List[int] = []
+        for mat_id, count in buffered.items():
+            to_pick.extend([int(mat_id)] * int(count))
+        to_pick = _tall_blocks_first(to_pick)
+
+        self._ensure_docked_at_station(
+            workbench_id, "clear WB shelf before next product placement"
+        )
+        for mat_id in to_pick:
+            if self._ledger.count(workbench_id, mat_id) <= 0:
+                continue
+            if not self._node.cargo_has_space_for(mat_id):
+                if not self._try_free_cargo_space(mat_id):
+                    # Last resort: hand back cargo surplus to its home
+                    # stations to make room, then come back and continue.
+                    self._log(
+                        f"  ! shelf-clear needs space for mat {mat_id} — "
+                        "returning cargo surplus to storage first"
+                    )
+                    self._soft(self._node.call_post_process(), "call_post_process (shelf-clear detour)")
+                    self._return_cargo_surplus_now()
+                    self._ensure_docked_at_station(
+                        workbench_id, "resume WB shelf clearing"
+                    )
+                    if not self._node.cargo_has_space_for(mat_id):
+                        raise ExecutionFailure(
+                            f"Cannot clear WB shelf: no cargo space for material {mat_id}"
+                        )
+            self._log(f"    ← clear-shelf pick mat {mat_id}")
+            ok = self._node.arm_pick_material(
+                station_id=workbench_id, material_id=mat_id
+            )
+            if not ok:
+                raise ExecutionFailure(
+                    f"Failed to clear material {mat_id} off workbench {workbench_id}"
+                )
+            self._ledger.remove(workbench_id, mat_id)
+            self._start_ready_intransit_assembly()
+        self._log_ledger('clear-wb-shelf')
+
+    def _return_cargo_surplus_now(self) -> None:
+        """Return cargo materials not needed by remaining production to their
+        home storage stations immediately (mid-mission pressure relief)."""
+        protected = self._remaining_product_material_need()
+        by_station: Dict[int, List[int]] = {}
+        for _, mat_id in self._node.cargo_materials_snapshot():
+            mat_id = int(mat_id)
+            if protected.get(mat_id, 0) > 0:
+                protected[mat_id] -= 1
+                continue
+            destination = self._plan.material_home_station.get(mat_id)
+            if destination is None:
+                continue
+            by_station.setdefault(destination, []).append(mat_id)
+
+        if not by_station:
+            self._log("  ! no returnable cargo surplus — cargo holds only needed materials")
+            return
+        self._return_grouped_materials(by_station, 'mid-mission-surplus-return')
 
     # ------------------------------------------------------------------
     # Workbench PRODUCE from recycled materials
@@ -523,11 +674,12 @@ class Executor:
             return
 
         to_pick: List[int] = []
-        for mat_id, count in sorted(buffered.items()):
+        for mat_id, count in buffered.items():
             n = min(int(count), int(remaining_need.get(int(mat_id), 0)))
             to_pick.extend([int(mat_id)] * n)
         if not to_pick:
             return
+        to_pick = _tall_blocks_first(to_pick)
 
         self._ensure_docked_at_station(
             workbench_id, "pick recycled materials needed by AMR assembly"
@@ -579,7 +731,7 @@ class Executor:
         # Keep any material still needed for AMR production on the WB ledger.
         remaining_need = self._remaining_material_need()
         to_pick: List[int] = []
-        for mat_id, count in sorted(buffered.items()):
+        for mat_id, count in buffered.items():
             mat_id = int(mat_id)
             destination = self._plan.material_home_station.get(mat_id)
             if destination is None or destination == workbench_id:
@@ -589,6 +741,7 @@ class Executor:
 
         if not to_pick:
             return
+        to_pick = _tall_blocks_first(to_pick)
 
         self._ensure_docked_at_station(
             workbench_id, "pick surplus recycled materials for return"
@@ -728,24 +881,26 @@ class Executor:
                 f"  → fetch buffered surplus from workbench {wid}: {fetch_from_wb}"
             )
             self._ensure_docked_at_station(wid, "fetch buffered surplus for return")
-            for mat_id, cnt in sorted(fetch_from_wb.items()):
-                for _ in range(cnt):
-                    if self._ledger.count(wid, mat_id) <= 0:
-                        break
-                    if not self._node.cargo_has_space_for(mat_id):
-                        self._log(
-                            f"  ! no cargo space for surplus mat {mat_id}; "
-                            "leaving the rest on the WB shelf"
-                        )
-                        break
-                    self._require(
-                        self._node.arm_pick_material(
-                            station_id=wid, material_id=mat_id
-                        ),
-                        f"arm_pick_material(station={wid}, material={mat_id}) (surplus)",
+            fetch_order = _tall_blocks_first(
+                [m for m, c in fetch_from_wb.items() for _ in range(c)]
+            )
+            for mat_id in fetch_order:
+                if self._ledger.count(wid, mat_id) <= 0:
+                    continue
+                if not self._node.cargo_has_space_for(mat_id):
+                    self._log(
+                        f"  ! no cargo space for surplus mat {mat_id}; "
+                        "leaving it on the WB shelf"
                     )
-                    self._ledger.remove(wid, mat_id)
-                    fetched[mat_id] += 1
+                    continue
+                self._require(
+                    self._node.arm_pick_material(
+                        station_id=wid, material_id=mat_id
+                    ),
+                    f"arm_pick_material(station={wid}, material={mat_id}) (surplus)",
+                )
+                self._ledger.remove(wid, mat_id)
+                fetched[mat_id] += 1
             self._soft(self._node.call_post_process(), "call_post_process (surplus fetch)")
             self._log_ledger('surplus-fetch-from-wb')
 
@@ -831,7 +986,7 @@ class Executor:
             self._return_matching_surplus_at_station(sid)
 
             needs_revisit = False
-            for mat_id in entry.get('pickup_materials', []):
+            for mat_id in _tall_blocks_first(entry.get('pickup_materials', [])):
                 # Per-material space check: a 4x2 block needs 4 free units,
                 # which cargo_is_full() (2-unit check) cannot see. Prefer
                 # consuming loaded materials into a cargo 7/8 ASSEMBLE over
@@ -1136,6 +1291,11 @@ class Executor:
 
             self._log(f"  → navigate to workbench {workbench_id} for RECYCLE")
             self._approach(workbench_id)
+            # The shelf must be empty before the product is placed on it:
+            # collect any still-pending RECYCLE outputs, then clear every
+            # loose material (e.g. Phase 2 overflow buffers) off the shelf.
+            self._collect_ready_recycle_outputs(block=True)
+            self._pick_all_workbench_materials(workbench_id)
             self._require(
                 self._node.arm_unload_product_to_workbench(
                     product_id=pid, station_id=workbench_id,

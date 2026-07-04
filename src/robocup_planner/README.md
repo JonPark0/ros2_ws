@@ -68,12 +68,20 @@ WB PRODUCE 시작 시 원장에서 재료를 예약하며, 불일치 시 즉시 
 
 - 워크벤치에 새 제품을 내려놓기 **전에**, 이전 분해 산출물을 먼저 회수합니다
   (`_collect_recycled_materials()`).
-- 분해 산출물은 ① WB PRODUCE 예약분 소비 → ② AMR 조립에 필요한 만큼만 픽업
-  순으로 처리합니다. **잉여분은 생산 작업이 남아 있는 동안 WB 선반(원장)에
-  남겨 두고**, 미션 마지막의 잉여 반납 단계에서 회수합니다 — 잉여가 cargo
-  2-6을 점유해 생산용 픽업 공간을 잠식하지 않게 하기 위함입니다.
-- cargo 2-6이 가득 차면(`cargo_is_full()`) 이미 워크벤치에 있는 김에 자재를
-  버퍼로 내려놓습니다(`arm_unload_all_materials()` + 원장 기록).
+- **선반 비움 불변조건**: 다음 recycle 제품을 WB에 내려놓기 전에는 직전
+  분해로 선반에 남은 재료를 (필요분이든 잉여든) **전부** 수거합니다
+  (`_pick_all_workbench_materials`, `clear_shelf=True`) — 재료 더미 위에
+  제품을 올리는 물리 충돌을 막는 하드 제약입니다. deferred recycle 단계의
+  제품 배치 전에도 동일하게 강제됩니다.
+- 더 이상 선반에 제품을 올릴 일이 없는 시점(마지막 recycle 이후)에는 잉여를
+  선반(원장)에 남겨 cargo 2-6 공간을 아끼고, 미션 마지막 잉여 반납 단계에서
+  회수합니다.
+- 분해 산출물 처리 순서: ① cargo에 실려 간 재료로 세트가 완성되는 WB PRODUCE가
+  있으면 되돌려 놓기(`_feed_workbench_production_from_cargo`) → ② WB PRODUCE
+  예약분 소비 → ③ AMR 필요분 픽업 → ④ (배치 예정 시) 선반 전체 수거.
+- recycle 단계 중 cargo가 가득 차면 WB에 버퍼로 내려놓는 대신(선반 비움
+  불변조건 위반) **잉여를 원래 보관소에 즉시 반납**하는 우회를 합니다
+  (`_return_cargo_surplus_now`).
 - **대기 정책** (`wb_recycle_wait_mode`): `auto`(기본)는 겹칠 만한 AMR 생산
   작업이 남아 있지 않은 마지막 recycle에 한해 WB 옆에서 대기합니다. 대기 시
   회전 없이 `wb_clearance_backup_distance`(기본 10cm)만 후진했다가 재도킹해
@@ -113,6 +121,9 @@ WB PRODUCE 시작 시 원장에서 재료를 예약하며, 불일치 시 즉시 
 - **픽업 즉시 조립 시작**: 재료를 하나 실을 때마다
   `_start_ready_intransit_assembly()`를 호출해, 세트가 완성되는 순간
   ASSEMBLE이 시작됩니다(주행·이탈 기동과 겹쳐 실행).
+- **4×2 우선 적재**(`_tall_blocks_first`): 슬롯(6유닛)에 2×2(2유닛)들이 먼저
+  짝지어 들어가면 남는 2유닛 틈은 4×2(4유닛)가 못 쓰는 파편이 됩니다. 모든
+  픽업 배치에서 4×2 블록을 먼저 실어 파편화를 방지합니다.
 - **fail-loud 픽업**: `arm_pick_material()`은 공간 없는 픽업을 사전
   거부하고, 적재 후 슬롯 배정 실패(상태 불일치)도 오류로 드러냅니다.
 
@@ -203,7 +214,8 @@ lifecycle boost(`deferred_recycle_priority_boost`)로 결정됩니다.
 | `motion_period_sec` | `0.05` | cmd_vel 발행 주기 [s] |
 | `product_weights_json` | `""` | `{"product_id": weight}` — cargo 7/8 우선순위 가중치 |
 | `nav_timeout_sec` | `60.0` | navigate 1회 대기 한도 [s] |
-| `arm_timeout_sec` | `30.0` | arm/post_process 1회 대기 한도 [s] |
+| `arm_timeout_sec` | `30.0` | arm(LOAD/UNLOAD)/post_process 1회 대기 한도 [s] |
+| `assemble_timeout_sec` | `180.0` | ASSEMBLE(제품 전체 조립) 대기 한도 [s] — 재시도 없음 |
 | `wb_timeout_sec` | `120.0` | wb_task 1회 대기 한도 + async watchdog [s] |
 | `call_max_retries` | `2` | 타임아웃/실패 시 재시도 횟수 |
 | `nav_cancel_grace_sec` | `5.0` | 타임아웃 goal cancel 후 busy 해제 대기 [s] |

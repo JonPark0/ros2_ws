@@ -18,6 +18,9 @@ robocup_planner:
     # instead of hanging the executor thread forever on a dead server.
     nav_timeout_sec: 60.0
     arm_timeout_sec: 30.0
+    # ASSEMBLE은 제품 하나를 통째로 조립(필드 실측: 4블록 Burger 30.4s)하므로
+    # 짧은 arm_timeout_sec을 쓰지 않는다. 재시도 없음(단일 팔 자원).
+    assemble_timeout_sec: 180.0
     wb_timeout_sec: 120.0
     call_max_retries: 2
     nav_cancel_grace_sec: 5.0

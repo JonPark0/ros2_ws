@@ -193,7 +193,9 @@ class PlannerNode(Node):
         cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
         self._debug_export: bool = self.get_parameter('debug_export').get_parameter_value().bool_value
         _export_dir = self.get_parameter('debug_export_dir').get_parameter_value().string_value
-        self._debug_export_dir: str = _export_dir if _export_dir else '/tmp/robocup_planner'
+        self._debug_export_dir: str = (
+            os.path.expanduser(_export_dir) if _export_dir else '/tmp/robocup_planner'
+        )
 
         self._side: str = normalize_side(
             self.get_parameter('side').get_parameter_value().string_value
